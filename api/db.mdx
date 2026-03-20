@@ -253,3 +253,123 @@ Package-level function that wraps a raw SQL fragment and its arguments into a `c
 // Increment a counter without loading the record
 db.Model(&product).Update("price", gorm.Expr("price * ? + ?", 0.9, 10))
 ```
+
+---
+
+## Generics API — G[T]
+
+```go
+func G[T any](db *DB, opts ...clause.Expression) Interface[T]
+```
+
+`G[T]` is GORM's type-safe generics API, available in Go 1.18+. It wraps a `*DB` and exposes all CRUD and query operations as strongly-typed methods that return `T` or `[]T` directly — no type assertions or pointer scanning required.
+
+```go
+import "gorm.io/gorm"
+
+type User struct {
+    gorm.Model
+    Name string
+    Age  int
+}
+
+// Create a type-safe query handle for User
+users := gorm.G[User](db)
+
+// First returns (User, error) — no pointer needed
+user, err := users.Where("name = ?", "jinzhu").First(ctx)
+
+// Find returns ([]User, error)
+list, err := users.Where("age > ?", 18).Order("name ASC").Find(ctx)
+
+// Create
+err = users.Create(ctx, &User{Name: "jinzhu", Age: 20})
+
+// Update — returns (rowsAffected int, err error)
+n, err := users.Where("age < ?", 18).Update(ctx, "age", 18)
+
+// Delete
+n, err = users.Where("name = ?", "old").Delete(ctx)
+```
+
+### Interface[T]
+
+The top-level interface returned by `G[T]`:
+
+```go
+type Interface[T any] interface {
+    Raw(sql string, values ...interface{}) ExecInterface[T]
+    Exec(ctx context.Context, sql string, values ...interface{}) error
+    CreateInterface[T]
+}
+```
+
+### ExecInterface[T]
+
+Query execution methods returning typed results:
+
+```go
+type ExecInterface[T any] interface {
+    First(context.Context) (T, error)
+    Last(ctx context.Context) (T, error)
+    Take(context.Context) (T, error)
+    Find(ctx context.Context) ([]T, error)
+    FindInBatches(ctx context.Context, batchSize int, fc func(data []T, batch int) error) error
+    Scan(ctx context.Context, r interface{}) error
+    Row(ctx context.Context) *sql.Row
+    Rows(ctx context.Context) (*sql.Rows, error)
+}
+```
+
+### ChainInterface[T]
+
+Chainable query-building methods:
+
+```go
+type ChainInterface[T any] interface {
+    ExecInterface[T]
+    Where(query interface{}, args ...interface{}) ChainInterface[T]
+    Not(query interface{}, args ...interface{}) ChainInterface[T]
+    Or(query interface{}, args ...interface{}) ChainInterface[T]
+    Select(query string, args ...interface{}) ChainInterface[T]
+    Omit(columns ...string) ChainInterface[T]
+    Order(value interface{}) ChainInterface[T]
+    Limit(offset int) ChainInterface[T]
+    Offset(offset int) ChainInterface[T]
+    Distinct(args ...interface{}) ChainInterface[T]
+    Group(name string) ChainInterface[T]
+    Having(query interface{}, args ...interface{}) ChainInterface[T]
+    Joins(query clause.JoinTarget, on func(db JoinBuilder, joinTable clause.Table, curTable clause.Table) error) ChainInterface[T]
+    Preload(association string, query func(db PreloadBuilder) error) ChainInterface[T]
+    MapColumns(m map[string]string) ChainInterface[T]
+    Scopes(scopes ...func(db *Statement)) ChainInterface[T]
+    Table(name string, args ...interface{}) ChainInterface[T]
+    Delete(ctx context.Context) (rowsAffected int, err error)
+    Update(ctx context.Context, name string, value any) (rowsAffected int, err error)
+    Updates(ctx context.Context, t T) (rowsAffected int, err error)
+    Count(ctx context.Context, column string) (result int64, err error)
+    Set(assignments ...clause.Assigner) SetUpdateOnlyInterface[T]
+}
+```
+
+### PreloadBuilder
+
+Used in `Preload` callbacks with the generics API:
+
+```go
+type PreloadBuilder interface {
+    Select(...string) PreloadBuilder
+    Omit(...string) PreloadBuilder
+    Where(query interface{}, args ...interface{}) PreloadBuilder
+    Not(query interface{}, args ...interface{}) PreloadBuilder
+    Or(query interface{}, args ...interface{}) PreloadBuilder
+    Limit(offset int) PreloadBuilder
+    Offset(offset int) PreloadBuilder
+    Order(value interface{}) PreloadBuilder
+    LimitPerRecord(num int) PreloadBuilder  // limit per parent record (not supported for many2many)
+}
+```
+
+<Note>
+`G[T]` requires Go 1.18 or later. The traditional `*DB` API continues to work in all Go versions and is not deprecated.
+</Note>
