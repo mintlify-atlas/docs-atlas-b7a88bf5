@@ -1,0 +1,254 @@
+---
+title: 'Callbacks'
+description: 'Register, replace, and remove hooks in the GORM callback pipeline'
+---
+
+GORM executes every database operation through an ordered pipeline of callback functions. You can insert your own functions at any point in that pipeline — before or after any built-in step — without modifying GORM itself.
+
+## Callback processors
+
+GORM maintains six callback processors, one per operation type:
+
+| Processor | Triggered by |
+|---|---|
+| `Create()` | `db.Create()`, `db.Save()` |
+| `Query()` | `db.Find()`, `db.First()`, `db.Scan()` |
+| `Update()` | `db.Update()`, `db.Updates()`, `db.Save()` |
+| `Delete()` | `db.Delete()` |
+| `Row()` | `db.Row()`, `db.Rows()` |
+| `Raw()` | `db.Raw()`, `db.Exec()` |
+
+Access any processor through `db.Callback()`:
+
+```go
+db.Callback().Create()  // create processor
+db.Callback().Query()   // query processor
+db.Callback().Update()  // update processor
+db.Callback().Delete()  // delete processor
+db.Callback().Row()     // row processor
+db.Callback().Raw()     // raw processor
+```
+
+## Callback function signature
+
+Every callback is a plain Go function that receives a `*gorm.DB`:
+
+```go
+func(db *gorm.DB)
+```
+
+The function can read and modify `db.Statement` to inspect or alter the current operation. To signal a failure, call `db.AddError(err)` — GORM will stop executing subsequent callbacks in the chain and return the error to the caller.
+
+```go
+func myCallback(db *gorm.DB) {
+    if someConditionFails {
+        db.AddError(errors.New("condition not met"))
+        return
+    }
+    // proceed with logic
+}
+```
+
+## Registering a callback
+
+Use `.Register(name, fn)` on a processor to add a new callback:
+
+```go
+// Register a callback that runs during every create operation
+db.Callback().Create().Register("my-plugin:set_created_by", func(db *gorm.DB) {
+    if db.Statement.Schema != nil {
+        // set a CreatedBy field if it exists
+        if field := db.Statement.Schema.LookUpField("CreatedBy"); field != nil {
+            field.Set(db.Statement.Context, db.Statement.ReflectValue, currentUserID())
+        }
+    }
+})
+```
+
+<Note>
+Callback names must be unique within a processor. Registering two callbacks with the same name on the same processor produces a warning in the GORM log.
+</Note>
+
+## Ordering callbacks
+
+Use `.Before("other-name")` or `.After("other-name")` to control where your callback runs relative to an existing one:
+
+```go
+// Run before GORM's built-in create callback
+db.Callback().Create().
+    Before("gorm:create").
+    Register("my-plugin:before_create", func(db *gorm.DB) {
+        fmt.Println("before create:", db.Statement.Table)
+    })
+
+// Run after GORM's built-in create callback
+db.Callback().Create().
+    After("gorm:create").
+    Register("my-plugin:after_create", func(db *gorm.DB) {
+        fmt.Println("after create:", db.Statement.Table)
+    })
+```
+
+You can also use `"*"` as a wildcard to force a callback to run before or after all others:
+
+```go
+// Always run first in the create pipeline
+db.Callback().Create().
+    Before("*").
+    Register("my-plugin:first", myFirstCallback)
+
+// Always run last in the create pipeline
+db.Callback().Create().
+    After("*").
+    Register("my-plugin:last", myLastCallback)
+```
+
+## Conditional callbacks
+
+Use `.Match(func(*gorm.DB) bool)` to register a callback that only runs when a condition is true. The match function is evaluated once at compile time (when `Register` is called), not on every operation:
+
+```go
+// Only register the callback when running in debug mode
+db.Callback().Query().
+    Match(func(db *gorm.DB) bool {
+        return db.Config.DryRun
+    }).
+    Register("debug:log_query", func(db *gorm.DB) {
+        fmt.Println("[dry-run] query:", db.Statement.SQL.String())
+    })
+```
+
+<Tip>
+Use `db.Statement.Context` inside a callback to access request-scoped values (such as a user identity or trace ID) that were passed via `db.WithContext(ctx)`.
+</Tip>
+
+## Replacing a callback
+
+Use `.Replace(name, fn)` to swap out an existing callback — including GORM's built-in ones — with your own implementation. The replacement runs in the same position as the original:
+
+```go
+// Replace the built-in create callback entirely
+db.Callback().Create().Replace("gorm:create", func(db *gorm.DB) {
+    // custom SQL execution logic
+    result, err := db.Statement.ConnPool.ExecContext(
+        db.Statement.Context,
+        db.Statement.SQL.String(),
+        db.Statement.Vars...,
+    )
+    if err != nil {
+        db.AddError(err)
+        return
+    }
+    rowsAffected, _ := result.RowsAffected()
+    db.RowsAffected = rowsAffected
+})
+```
+
+<Warning>
+Replacing built-in GORM callbacks (those prefixed with `"gorm:"`) can break expected behavior. Make sure your replacement handles all edge cases that the original covers, or call the original inside your replacement.
+</Warning>
+
+## Removing a callback
+
+Use `.Remove(name)` to delete a callback from the pipeline. GORM logs a warning when a callback is removed:
+
+```go
+// Remove the built-in update_time callback so GORM won't auto-set UpdatedAt
+db.Callback().Update().Remove("gorm:update_time_unix_nano")
+```
+
+## Checking the current SQL statement
+
+Inside a callback, `db.Statement` exposes the full context of the operation:
+
+```go
+db.Callback().Create().After("gorm:create").Register("audit:log", func(db *gorm.DB) {
+    if db.Error != nil {
+        return // don't log failed operations
+    }
+
+    // Access the table name
+    table := db.Statement.Table
+
+    // Access the number of rows affected
+    rows := db.RowsAffected
+
+    log.Printf("inserted %d row(s) into %s", rows, table)
+})
+```
+
+## Registering callbacks from a plugin
+
+The recommended pattern is to register all callbacks inside a plugin's `Initialize` method so that they are grouped together and tied to the plugin lifecycle:
+
+```go
+type TimestampPlugin struct{}
+
+func (p *TimestampPlugin) Name() string { return "timestamp-plugin" }
+
+func (p *TimestampPlugin) Initialize(db *gorm.DB) error {
+    db.Callback().Create().
+        Before("gorm:create").
+        Register("timestamp-plugin:set_created_at", setCreatedAt)
+
+    db.Callback().Update().
+        Before("gorm:update").
+        Register("timestamp-plugin:set_updated_at", setUpdatedAt)
+
+    return nil
+}
+
+func setCreatedAt(db *gorm.DB) {
+    if db.Statement.Schema != nil {
+        if f := db.Statement.Schema.LookUpField("CreatedAt"); f != nil {
+            f.Set(db.Statement.Context, db.Statement.ReflectValue, time.Now())
+        }
+    }
+}
+
+func setUpdatedAt(db *gorm.DB) {
+    if db.Statement.Schema != nil {
+        if f := db.Statement.Schema.LookUpField("UpdatedAt"); f != nil {
+            f.Set(db.Statement.Context, db.Statement.ReflectValue, time.Now())
+        }
+    }
+}
+```
+
+## Built-in callback names
+
+GORM's own callbacks follow the `"gorm:<name>"` convention. Common names you may want to target with `Before`/`After`:
+
+<AccordionGroup>
+  <Accordion title="Create callbacks">
+    - `gorm:begin_transaction`
+    - `gorm:before_create`
+    - `gorm:save_before_associations`
+    - `gorm:create`
+    - `gorm:save_after_associations`
+    - `gorm:after_create`
+    - `gorm:commit_or_rollback_transaction`
+  </Accordion>
+  <Accordion title="Query callbacks">
+    - `gorm:query`
+    - `gorm:preload`
+    - `gorm:after_query`
+  </Accordion>
+  <Accordion title="Update callbacks">
+    - `gorm:begin_transaction`
+    - `gorm:before_update`
+    - `gorm:save_before_associations`
+    - `gorm:update`
+    - `gorm:save_after_associations`
+    - `gorm:after_update`
+    - `gorm:commit_or_rollback_transaction`
+  </Accordion>
+  <Accordion title="Delete callbacks">
+    - `gorm:begin_transaction`
+    - `gorm:before_delete`
+    - `gorm:delete_before_associations`
+    - `gorm:delete`
+    - `gorm:after_delete`
+    - `gorm:commit_or_rollback_transaction`
+  </Accordion>
+</AccordionGroup>

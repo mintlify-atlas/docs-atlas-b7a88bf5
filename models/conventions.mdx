@@ -1,0 +1,297 @@
+---
+title: Conventions
+description: Understand how GORM derives table names, column names, primary keys, and timestamps — and how to override each convention.
+---
+
+GORM follows a set of conventions to map Go structs to database tables without requiring explicit configuration. Understanding these conventions lets you write models with minimal boilerplate, and knowing how to override them gives you full control when defaults don't fit.
+
+## ID as primary key
+
+GORM automatically treats a field named `ID` as the primary key for any model. This lookup happens in `schema/schema.go`:
+
+```go
+// From schema/schema.go — GORM looks up "id" or "ID" to set the primary key
+prioritizedPrimaryField := schema.LookUpField("id")
+if prioritizedPrimaryField == nil {
+    prioritizedPrimaryField = schema.LookUpField("ID")
+}
+```
+
+If the `ID` field is an integer or unsigned integer type, GORM also marks it as auto-increment:
+
+```go
+// Integer/uint primary keys get auto-increment enabled automatically
+switch field.GORMDataType {
+case Int, Uint:
+    if _, ok := field.TagSettings["AUTOINCREMENT"]; !ok {
+        field.HasDefaultValue = true
+        field.AutoIncrement = true
+    }
+}
+```
+
+This means the following two structs behave identically:
+
+```go
+// Explicit
+type User struct {
+    ID uint `gorm:"primaryKey;autoIncrement"`
+}
+
+// Conventional — same result
+type User struct {
+    ID uint
+}
+```
+
+## Table name pluralization
+
+GORM pluralizes the struct name using the `inflection` package and converts it to snake_case. The logic lives in `schema/naming.go`:
+
+```go
+func (ns NamingStrategy) TableName(str string) string {
+    if ns.SingularTable {
+        return ns.TablePrefix + ns.toDBName(str)
+    }
+    return ns.TablePrefix + inflection.Plural(ns.toDBName(str))
+}
+```
+
+Examples of the default mapping:
+
+| Struct name   | Table name      |
+|---------------|-----------------|
+| `User`        | `users`         |
+| `OrderItem`   | `order_items`   |
+| `Category`    | `categories`    |
+| `Person`      | `people`        |
+| `APIKey`      | `api_keys`      |
+
+## Column name from field name
+
+Field names are converted to snake_case using `NamingStrategy.toDBName`. The strategy handles common initialisms (`ID`, `URL`, `HTTP`, `JSON`, etc.) from the Go lint list so they convert predictably:
+
+```go
+// From schema/naming.go
+var commonInitialisms = []string{
+    "API", "ASCII", "CPU", "CSS", "DNS", "EOF", "GUID",
+    "HTML", "HTTP", "HTTPS", "ID", "IP", "JSON", "LHS",
+    "QPS", "RAM", "RHS", "RPC", "SLA", "SMTP", "SSH",
+    "TLS", "TTL", "UID", "UI", "UUID", "URI", "URL",
+    "UTF8", "VM", "XML", "XSRF", "XSS",
+}
+```
+
+Examples:
+
+| Field name     | Column name     |
+|----------------|------------------|
+| `Name`         | `name`           |
+| `FirstName`    | `first_name`     |
+| `UserID`       | `user_id`        |
+| `APIKey`       | `api_key`        |
+| `HTTPSPort`    | `https_port`     |
+| `CreatedAt`    | `created_at`     |
+
+## Timestamp fields
+
+GORM recognizes fields named `CreatedAt` and `UpdatedAt` by convention and manages them automatically. The detection logic in `schema/field.go`:
+
+```go
+// autoCreateTime is set when field is named "CreatedAt" and has time/int/uint data type
+if v, ok := field.TagSettings["AUTOCREATETIME"]; (ok && utils.CheckTruth(v)) ||
+    (!ok && field.Name == "CreatedAt" && (field.DataType == Time || field.DataType == Int || field.DataType == Uint)) {
+    // ...
+}
+
+// autoUpdateTime is set when field is named "UpdatedAt"
+if v, ok := field.TagSettings["AUTOUPDATETIME"]; (ok && utils.CheckTruth(v)) ||
+    (!ok && field.Name == "UpdatedAt" && (field.DataType == Time || field.DataType == Int || field.DataType == Uint)) {
+    // ...
+}
+```
+
+Timestamp fields can be `time.Time`, `int64`, or `uint64`. When using integer types, GORM stores Unix timestamps:
+
+```go
+type User struct {
+    ID        uint
+    Name      string
+    CreatedAt time.Time // set on insert
+    UpdatedAt time.Time // set on insert and update
+}
+
+// Unix timestamp variants
+type Event struct {
+    ID        uint
+    Name      string
+    CreatedAt int64 `gorm:"autoCreateTime"`        // Unix seconds
+    UpdatedAt int64 `gorm:"autoUpdateTime:milli"`  // Unix milliseconds
+}
+```
+
+`DeletedAt` requires the `gorm.DeletedAt` type to enable soft-delete behavior:
+
+```go
+type User struct {
+    ID        uint
+    Name      string
+    DeletedAt gorm.DeletedAt `gorm:"index"` // enables soft delete
+}
+```
+
+## Using gorm.Model vs custom fields
+
+`gorm.Model` is the quickest way to get standard lifecycle fields:
+
+```go
+// gorm.Model definition
+type Model struct {
+    ID        uint           `gorm:"primarykey"`
+    CreatedAt time.Time
+    UpdatedAt time.Time
+    DeletedAt gorm.DeletedAt `gorm:"index"`
+}
+```
+
+If you need different field types, different primary key types, or no soft-delete, define the fields yourself:
+
+<CodeGroup>
+
+```go with gorm.Model
+type Post struct {
+    gorm.Model
+    Title   string
+    Content string
+}
+// Table: posts
+// Columns: id, created_at, updated_at, deleted_at, title, content
+```
+
+```go custom fields
+type Post struct {
+    ID        string    `gorm:"primaryKey;size:36"` // UUID primary key
+    CreatedAt time.Time
+    UpdatedAt time.Time
+    // No DeletedAt — hard deletes only
+    Title   string
+    Content string
+}
+```
+
+</CodeGroup>
+
+<Warning>
+If you use `gorm.Model`, all deletes are soft deletes. Queries automatically filter rows where `deleted_at IS NOT NULL`. Use `db.Unscoped()` to include soft-deleted records.
+</Warning>
+
+## Overriding table names
+
+Implement the `Tabler` interface to return a fixed table name:
+
+```go
+type User struct {
+    ID   uint
+    Name string
+}
+
+func (User) TableName() string {
+    return "profiles"
+}
+```
+
+GORM checks for this interface during schema parsing:
+
+```go
+// From schema/schema.go
+if tabler, ok := modelValue.Interface().(Tabler); ok {
+    tableName = tabler.TableName()
+}
+```
+
+## Custom NamingStrategy
+
+Configure naming behavior globally when initializing your `gorm.DB`. The `NamingStrategy` struct in `schema/naming.go` exposes these options:
+
+```go
+type NamingStrategy struct {
+    TablePrefix         string   // prepend to all table names
+    SingularTable       bool     // disable pluralization
+    NameReplacer        Replacer // custom replacement rules
+    NoLowerCase         bool     // skip lowercasing
+    IdentifierMaxLength int      // max length for generated identifiers (default 64)
+}
+```
+
+Example — table prefix and singular table names:
+
+```go
+db, err := gorm.Open(sqlite.Open("app.db"), &gorm.Config{
+    NamingStrategy: schema.NamingStrategy{
+        TablePrefix:   "app_",      // User -> app_user
+        SingularTable: true,        // User -> app_user (not app_users)
+    },
+})
+```
+
+Example — custom name replacer:
+
+```go
+type MyReplacer struct{}
+
+func (r MyReplacer) Replace(name string) string {
+    return strings.NewReplacer("User", "Member").Replace(name)
+}
+
+db, err := gorm.Open(sqlite.Open("app.db"), &gorm.Config{
+    NamingStrategy: schema.NamingStrategy{
+        NameReplacer: MyReplacer{},
+    },
+})
+```
+
+## Data type mappings
+
+GORM infers the GORM data type from the Go field type. These types are defined in `schema/field.go`:
+
+```go
+const (
+    Bool   DataType = "bool"
+    Int    DataType = "int"
+    Uint   DataType = "uint"
+    Float  DataType = "float"
+    String DataType = "string"
+    Time   DataType = "time"
+    Bytes  DataType = "bytes"
+)
+```
+
+| Go type                          | GORM DataType |
+|----------------------------------|---------------|
+| `bool`                           | `bool`        |
+| `int`, `int8` … `int64`          | `int`         |
+| `uint`, `uint8` … `uint64`       | `uint`        |
+| `float32`, `float64`             | `float`       |
+| `string`                         | `string`      |
+| `time.Time`                      | `time`        |
+| `[]byte`                         | `bytes`       |
+
+Default sizes are also inferred from the Go type:
+
+| Go type              | Default size |
+|----------------------|--------------|
+| `int8`, `uint8`      | 8            |
+| `int16`, `uint16`    | 16           |
+| `int32`, `uint32`, `float32` | 32   |
+| `int`, `int64`, `uint`, `uint64`, `float64` | 64 |
+
+Override the SQL type explicitly with the `type` tag:
+
+```go
+type Article struct {
+    ID      uint
+    Body    string `gorm:"type:text"`
+    Score   float64 `gorm:"type:decimal(10,2)"`
+    Enabled bool
+}
+```

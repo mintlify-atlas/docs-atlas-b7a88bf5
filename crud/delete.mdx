@@ -1,0 +1,174 @@
+---
+title: "Deleting records"
+description: "Delete records by model, condition, or primary key. Understand soft deletes via gorm.Model and how to use Unscoped for permanent deletion and inclusive queries."
+---
+
+## Basic delete
+
+Pass a model pointer with a populated primary key to delete that row. GORM uses the primary key as the WHERE condition.
+
+```go
+var user User
+db.First(&user, 1) // fetch user with id=1
+
+db.Delete(&user)
+// DELETE FROM users WHERE id=1;
+```
+
+You can also pass the primary key inline:
+
+```go
+// Pass the id as the second argument
+db.Delete(&User{}, 1)
+// DELETE FROM users WHERE id=1;
+
+// String condition
+db.Delete(&User{}, "id = ?", 1)
+// DELETE FROM users WHERE id=1;
+```
+
+## Delete with conditions
+
+Use `Where` to scope the delete to matching rows:
+
+```go
+// DELETE FROM users WHERE email LIKE '%@example.com';
+db.Where("email LIKE ?", "%@example.com").Delete(&User{})
+
+// Equivalent inline form
+db.Delete(&User{}, "email LIKE ?", "%@example.com")
+```
+
+## Batch delete by primary keys
+
+Pass a slice of primary keys to delete multiple rows at once:
+
+```go
+// DELETE FROM users WHERE id IN (1, 2, 3);
+db.Delete(&User{}, []int{1, 2, 3})
+
+// Or via Where
+db.Where("id IN ?", []int{1, 2, 3}).Delete(&User{})
+```
+
+## Soft delete
+
+When a model has a `DeletedAt` field of type `gorm.DeletedAt` (included automatically via `gorm.Model`), GORM performs a **soft delete** instead of a physical DELETE.
+
+```go
+// gorm.Model embeds this automatically:
+type Model struct {
+  ID        uint           `gorm:"primarykey"`
+  CreatedAt time.Time
+  UpdatedAt time.Time
+  DeletedAt gorm.DeletedAt `gorm:"index"`
+}
+```
+
+With `gorm.Model` embedded, a delete call sets `DeletedAt` to the current timestamp rather than removing the row:
+
+```go
+type User struct {
+  gorm.Model
+  Name  string
+  Email string
+}
+
+var user User
+db.First(&user, 1)
+
+db.Delete(&user)
+// UPDATE users SET deleted_at=NOW() WHERE id=1;
+// The row is NOT removed from the table.
+```
+
+Subsequent queries automatically exclude soft-deleted records:
+
+```go
+// Soft-deleted records are invisible to normal queries
+db.Find(&users)
+// SELECT * FROM users WHERE deleted_at IS NULL;
+
+db.First(&user, 1)
+// SELECT * FROM users WHERE id=1 AND deleted_at IS NULL ORDER BY id LIMIT 1;
+// Returns gorm.ErrRecordNotFound if the user was soft-deleted.
+```
+
+<Tip>
+Soft delete is the default behavior for any model that embeds `gorm.Model` or defines a `DeletedAt gorm.DeletedAt` field. No extra configuration is needed.
+</Tip>
+
+## Including soft-deleted records with Unscoped
+
+Use `Unscoped` to bypass the automatic `deleted_at IS NULL` filter and include soft-deleted rows in query results:
+
+```go
+var users []User
+
+// Returns all users, including soft-deleted ones
+db.Unscoped().Find(&users)
+// SELECT * FROM users;
+
+// Find a specific soft-deleted record
+var user User
+db.Unscoped().First(&user, 1)
+// SELECT * FROM users WHERE id=1 ORDER BY id LIMIT 1;
+```
+
+## Permanent delete with Unscoped
+
+Chain `Unscoped` with `Delete` to issue a physical DELETE even on models that use soft delete:
+
+```go
+var user User
+db.First(&user, 1)
+
+// Permanently removes the row from the database
+db.Unscoped().Delete(&user)
+// DELETE FROM users WHERE id=1;
+```
+
+<Warning>
+Permanent deletes cannot be undone. If the table has `DeletedAt`, prefer soft delete (the default) unless you specifically need to reclaim storage or comply with a data-erasure requirement.
+</Warning>
+
+## Global delete protection
+
+GORM refuses to execute a DELETE without a WHERE clause and returns `gorm.ErrMissingWhereClause`:
+
+```go
+result := db.Delete(&User{})
+fmt.Println(result.Error) // gorm.ErrMissingWhereClause
+```
+
+To intentionally delete all rows, add an explicit always-true condition or use the `AllowGlobalUpdate` session option:
+
+```go
+// Explicit always-true condition
+db.Where("1 = 1").Delete(&User{})
+// DELETE FROM users;
+
+// Session option
+db.Session(&gorm.Session{AllowGlobalUpdate: true}).Delete(&User{})
+// DELETE FROM users;
+```
+
+<Warning>
+Deleting all rows is irreversible. On models with `gorm.Model` the rows will be soft-deleted (timestamps set), not physically removed, unless you also chain `Unscoped()`.
+</Warning>
+
+## Checking rows affected
+
+```go
+result := db.Where("age < ?", 18).Delete(&User{})
+fmt.Println(result.RowsAffected) // number of rows deleted (or soft-deleted)
+fmt.Println(result.Error)        // nil on success
+```
+
+## Error handling
+
+```go
+if err := db.Delete(&user).Error; err != nil {
+  // handle error
+}
+```

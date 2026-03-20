@@ -1,0 +1,163 @@
+---
+title: "GORM"
+description: "The fantastic ORM library for Golang, aims to be developer friendly"
+---
+
+<img
+  src="https://media.brand.dev/196dd3de-5580-4788-9d77-708172bc9cda.svg"
+  alt="GORM"
+  style={{ height: "60px", marginBottom: "24px" }}
+/>
+
+## The fantastic ORM library for Golang
+
+GORM is a full-featured ORM library for Go that makes working with databases easy, safe, and productive. It provides a clean, chainable API that handles everything from simple CRUD operations to complex associations, transactions, and migrations.
+
+<CardGroup cols={2}>
+  <Card title="Quickstart" icon="rocket" href="/quickstart">
+    Get up and running with GORM in minutes with a working example
+  </Card>
+  <Card title="Connecting to Database" icon="database" href="/connecting-to-database">
+    Connect to MySQL, PostgreSQL, SQLite, SQL Server, and more
+  </Card>
+  <Card title="CRUD Operations" icon="pen-to-square" href="/crud/create">
+    Create, read, update, and delete records with a clean chainable API
+  </Card>
+  <Card title="API Reference" icon="code" href="/api/db">
+    Full reference for the DB type, chainable methods, and finisher methods
+  </Card>
+</CardGroup>
+
+## Why GORM?
+
+GORM is the most popular ORM library in the Go ecosystem with over 39,000 GitHub stars. It provides everything you need to work with relational databases in Go without sacrificing developer experience.
+
+<CardGroup cols={3}>
+  <Card title="Full-Featured ORM" icon="layer-group">
+    Associations, hooks, transactions, migrations, and more out of the box
+  </Card>
+  <Card title="Developer Friendly" icon="face-smile">
+    Chainable API, clear error handling, and comprehensive documentation
+  </Card>
+  <Card title="Extensible" icon="puzzle-piece">
+    Plugin system for database resolvers, Prometheus metrics, and more
+  </Card>
+  <Card title="Multi-Database" icon="server">
+    Supports MySQL, PostgreSQL, SQLite, SQL Server, and custom dialectors
+  </Card>
+  <Card title="Safe by Default" icon="shield-check">
+    Transactions by default, soft deletes, and protection against global updates
+  </Card>
+  <Card title="Type-Safe" icon="check-double">
+    Generic API with `G[T]` for compile-time type safety in Go 1.18+
+  </Card>
+</CardGroup>
+
+## Key Features
+
+<AccordionGroup>
+  <Accordion title="Associations">
+    GORM supports all relationship types: Has One, Has Many, Belongs To, Many To Many, as well as Polymorphism and Single-table inheritance. Associations are defined directly in your Go structs using struct tags.
+  </Accordion>
+  <Accordion title="Hooks (Lifecycle Callbacks)">
+    Define Before/After hooks for Create, Save, Update, Delete, and Find operations. Hooks are methods on your model structs and integrate seamlessly with GORM's callback system.
+  </Accordion>
+  <Accordion title="Eager Loading">
+    Load associated records efficiently using `Preload` for separate queries or `Joins` for SQL JOINs. Both support conditional loading with additional where clauses.
+  </Accordion>
+  <Accordion title="Transactions">
+    GORM wraps single create/update/delete operations in transactions by default. You can use `Transaction()` for multi-step operations, and GORM supports nested transactions and savepoints.
+  </Accordion>
+  <Accordion title="Auto Migration">
+    Automatically migrate your schema using `AutoMigrate()`. GORM will create tables, missing columns, and missing indexes while preserving existing data.
+  </Accordion>
+  <Accordion title="SQL Builder">
+    Drop down to raw SQL when needed with `Raw()` and `Exec()`, or use the clause package to build SQL expressions programmatically. Supports named arguments, upsert, locking, and optimizer hints.
+  </Accordion>
+</AccordionGroup>
+
+## Installation
+
+```bash
+go get -u gorm.io/gorm
+```
+
+You also need a database driver:
+
+<CodeGroup>
+
+```bash MySQL
+go get -u gorm.io/driver/mysql
+```
+
+```bash PostgreSQL
+go get -u gorm.io/driver/postgres
+```
+
+```bash SQLite
+go get -u gorm.io/driver/sqlite
+```
+
+```bash SQL Server
+go get -u gorm.io/driver/sqlserver
+```
+
+</CodeGroup>
+
+## Quick Example
+
+```go
+package main
+
+import (
+  "gorm.io/driver/sqlite"
+  "gorm.io/gorm"
+)
+
+type Product struct {
+  gorm.Model
+  Code  string
+  Price uint
+}
+
+func main() {
+  db, err := gorm.Open(sqlite.Open("test.db"), &gorm.Config{})
+  if err != nil {
+    panic("failed to connect database")
+  }
+
+  // Migrate the schema
+  db.AutoMigrate(&Product{})
+
+  // Create
+  db.Create(&Product{Code: "D42", Price: 100})
+
+  // Read
+  var product Product
+  db.First(&product, 1)                 // find product with integer primary key
+  db.First(&product, "code = ?", "D42") // find product with code D42
+
+  // Update - update product's price to 200
+  db.Model(&product).Update("Price", 200)
+  // Update - update multiple fields
+  db.Model(&product).Updates(Product{Price: 200, Code: "F42"}) // non-zero fields
+  db.Model(&product).Updates(map[string]interface{}{"Price": 200, "Code": "F42"})
+
+  // Delete - delete product
+  db.Delete(&product, 1)
+}
+```
+
+## Supported Databases
+
+| Database   | Driver Package              |
+|------------|----------------------------|
+| MySQL      | `gorm.io/driver/mysql`     |
+| PostgreSQL | `gorm.io/driver/postgres`  |
+| SQLite     | `gorm.io/driver/sqlite`    |
+| SQL Server | `gorm.io/driver/sqlserver` |
+| ClickHouse | `gorm.io/driver/clickhouse`|
+
+## License
+
+GORM is released under the [MIT License](https://github.com/go-gorm/gorm/blob/master/LICENSE). © Jinzhu, 2013~time.Now

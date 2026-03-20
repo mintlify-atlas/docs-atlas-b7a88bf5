@@ -1,0 +1,229 @@
+---
+title: "Creating records"
+description: "Insert single records, batch insert, upsert, and find-or-create patterns using GORM's Create, Save, FirstOrCreate, and FirstOrInit methods."
+---
+
+## Basic create
+
+Pass a pointer to a model struct to `db.Create` to insert a new row. GORM populates the primary key field on the struct after the insert.
+
+```go
+type User struct {
+  gorm.Model
+  Name  string
+  Email string
+  Age   uint
+}
+
+user := User{Name: "Jinzhu", Email: "jinzhu@example.com", Age: 18}
+result := db.Create(&user)
+
+// user.ID is now populated with the inserted primary key
+fmt.Println(user.ID)        // e.g. 1
+fmt.Println(result.Error)   // nil on success
+fmt.Println(result.RowsAffected) // 1
+```
+
+<Note>
+`db.Create` requires a pointer. Passing a value (non-pointer) will panic at runtime.
+</Note>
+
+## Create multiple records
+
+Pass a slice pointer to insert multiple rows in a single statement.
+
+```go
+users := []User{
+  {Name: "Jinzhu", Email: "jinzhu@example.com", Age: 18},
+  {Name: "Jackson", Email: "jackson@example.com", Age: 19},
+  {Name: "Jill",    Email: "jill@example.com",    Age: 20},
+}
+
+result := db.Create(&users)
+
+for _, u := range users {
+  fmt.Println(u.ID) // each ID is populated
+}
+fmt.Println(result.RowsAffected) // 3
+```
+
+## Batch insert
+
+Use `CreateInBatches` to split a large slice into smaller INSERT statements. This limits memory usage and avoids hitting database parameter limits.
+
+```go
+var users []User
+for i := 0; i < 10000; i++ {
+  users = append(users, User{Name: fmt.Sprintf("user_%d", i)})
+}
+
+// Insert in batches of 100
+db.CreateInBatches(users, 100)
+```
+
+You can also configure a default batch size globally so that `db.Create` uses it automatically:
+
+```go
+db, err := gorm.Open(sqlite.Open("test.db"), &gorm.Config{
+  CreateBatchSize: 100,
+})
+
+// db.Create now inserts in batches of 100
+db.Create(&users)
+```
+
+<Tip>
+Batches larger than `batchSize` are wrapped in a transaction automatically. Set `SkipDefaultTransaction: true` on the config to opt out.
+</Tip>
+
+## Select specific fields on create
+
+Use `Select` to insert only the listed fields. All other fields are ignored.
+
+```go
+user := User{Name: "Jinzhu", Email: "jinzhu@example.com", Age: 18}
+
+// Only insert Name and Age; Email is omitted
+db.Select("Name", "Age").Create(&user)
+// INSERT INTO users (name, age, ...) VALUES ("Jinzhu", 18, ...)
+```
+
+## Omit specific fields on create
+
+Use `Omit` to exclude listed fields from the INSERT statement.
+
+```go
+user := User{Name: "Jinzhu", Email: "jinzhu@example.com", Age: 18}
+
+// Insert everything except Email
+db.Omit("Email").Create(&user)
+// INSERT INTO users (name, age, ...) VALUES ("Jinzhu", 18, ...)
+```
+
+You can also omit association fields by name:
+
+```go
+// Omit the Languages many-to-many association
+db.Omit("Languages.*").Create(&user)
+
+// Omit the association and its join table entries entirely
+db.Omit("Languages").Create(&user)
+```
+
+## Save (upsert)
+
+`Save` either inserts or updates a record depending on whether the primary key is set and non-zero.
+
+```go
+// No primary key set → INSERT
+user := User{Name: "Jinzhu", Age: 18}
+db.Save(&user)
+// INSERT INTO users (name, age, ...) VALUES (...)
+
+// Primary key is set → UPDATE all fields
+user.ID = 1
+user.Name = "Jinzhu Updated"
+db.Save(&user)
+// UPDATE users SET name="Jinzhu Updated", age=18, updated_at=... WHERE id=1
+```
+
+<Warning>
+`Save` performs a full-record update when the primary key is present. Every field — including zero-value fields — is written to the database. Use `Updates` when you only want to change specific columns.
+</Warning>
+
+When saving a slice, GORM uses an `ON CONFLICT (id) DO UPDATE SET ...` upsert:
+
+```go
+users := []User{
+  {Model: gorm.Model{ID: 1}, Name: "Updated Jinzhu"},
+  {Name: "New User"},
+}
+db.Save(&users)
+```
+
+## FirstOrCreate
+
+`FirstOrCreate` fetches the first matching record, or creates it if none exists. The result is always populated.
+
+```go
+var user User
+
+// Get the first user named Jinzhu, or create one
+result := db.FirstOrCreate(&user, User{Name: "Jinzhu"})
+
+fmt.Println(user)              // User{Name: "Jinzhu", ...}
+fmt.Println(result.RowsAffected) // 1 if created, 0 if found
+```
+
+Use `Attrs` to set extra fields only when creating:
+
+```go
+var user User
+
+// Email is only applied if the record is not found
+db.Where(User{Name: "non_existing"}).
+  Attrs(User{Email: "fallback@example.com"}).
+  FirstOrCreate(&user)
+// user → User{Name: "non_existing", Email: "fallback@example.com"}
+// (new record created)
+
+db.Where(User{Name: "Jinzhu"}).
+  Attrs(User{Email: "ignored@example.com"}).
+  FirstOrCreate(&user)
+// user → User{Name: "Jinzhu", ...}
+// (existing record returned, Attrs value ignored)
+```
+
+Use `Assign` to apply fields regardless of whether the record was found or created. When the record already exists, `Assign` triggers an UPDATE:
+
+```go
+var user User
+
+db.Where(User{Name: "Jinzhu"}).
+  Assign(User{Email: "always@example.com"}).
+  FirstOrCreate(&user)
+// If found: UPDATE users SET email="always@example.com" WHERE id=...
+// user → User{Name: "Jinzhu", Email: "always@example.com"}
+// result.RowsAffected → 1
+```
+
+## FirstOrInit
+
+`FirstOrInit` is identical to `FirstOrCreate` except it never writes to the database. It either returns the found record or initializes an in-memory struct.
+
+```go
+var user User
+
+// Finds an existing user, or initializes (but does NOT save) a new one
+db.FirstOrInit(&user, User{Name: "non_existing"})
+// user → User{Name: "non_existing"}
+// Nothing is written to the database
+
+// Attrs: applied only if the record is not found
+db.Where(User{Name: "non_existing"}).
+  Attrs(User{Email: "fallback@example.com"}).
+  FirstOrInit(&user)
+// user → User{Name: "non_existing", Email: "fallback@example.com"}
+
+// Assign: always applied
+db.Where(User{Name: "Jinzhu"}).
+  Assign(User{Email: "always@example.com"}).
+  FirstOrInit(&user)
+// user → User{Name: "Jinzhu", Age: 20, Email: "always@example.com"}
+// (still not saved — call db.Save(&user) to persist)
+```
+
+<Note>
+`FirstOrInit` is useful when you want to prepare a struct for display or validation before deciding whether to save it.
+</Note>
+
+## Error handling
+
+All GORM methods return `*gorm.DB`. Check `.Error` to detect failures:
+
+```go
+result := db.Create(&user)
+if result.Error != nil {
+  // handle error
+}
+```

@@ -1,0 +1,170 @@
+---
+title: Hooks
+description: Use lifecycle hooks to run logic before or after GORM operations on your models.
+---
+
+Hooks are methods defined on your model struct that GORM calls automatically at specific points in the lifecycle of a database operation. You can use them to enforce business rules, update related data, or abort an operation by returning an error.
+
+## Available hooks
+
+GORM supports hooks for create, save, update, delete, and query operations.
+
+<AccordionGroup>
+  <Accordion title="Create hooks">
+    Executed in this order:
+    1. `BeforeSave`
+    2. `BeforeCreate`
+    3. _create record in database_
+    4. `AfterCreate`
+    5. `AfterSave`
+  </Accordion>
+
+  <Accordion title="Update hooks">
+    Executed in this order:
+    1. `BeforeSave`
+    2. `BeforeUpdate`
+    3. _update record in database_
+    4. `AfterUpdate`
+    5. `AfterSave`
+  </Accordion>
+
+  <Accordion title="Delete hooks">
+    Executed in this order:
+    1. `BeforeDelete`
+    2. _delete record from database_
+    3. `AfterDelete`
+  </Accordion>
+
+  <Accordion title="Query hooks">
+    Executed after the query:
+    1. `AfterFind`
+  </Accordion>
+</AccordionGroup>
+
+## Defining a hook
+
+Define a hook as a pointer-receiver method on your model struct. The method must accept `*gorm.DB` and return `error`.
+
+```go
+type User struct {
+    gorm.Model
+    Name  string
+    Email string
+    Role  string
+}
+
+func (u *User) BeforeCreate(tx *gorm.DB) error {
+    if u.Role == "" {
+        u.Role = "member"
+    }
+    return nil
+}
+
+func (u *User) AfterCreate(tx *gorm.DB) error {
+    // Use tx for additional queries within the same transaction
+    return tx.Model(u).Update("created_by", "system").Error
+}
+```
+
+## Aborting an operation
+
+Return a non-nil error from any hook to abort the operation. GORM rolls back the transaction and propagates the error to the caller.
+
+```go
+func (u *User) BeforeDelete(tx *gorm.DB) error {
+    if u.Role == "admin" {
+        return errors.New("admin accounts cannot be deleted")
+    }
+    return nil
+}
+```
+
+```go
+result := db.Delete(&user)
+if result.Error != nil {
+    // hook aborted the delete
+    log.Println(result.Error)
+}
+```
+
+## Using tx inside hooks
+
+The `tx` parameter inside a hook shares the same transaction as the triggering operation. Use it to perform additional queries that must succeed or fail together with the main operation.
+
+```go
+func (u *User) AfterSave(tx *gorm.DB) error {
+    return tx.Create(&AuditLog{
+        UserID: u.ID,
+        Action: "save",
+    }).Error
+}
+```
+
+<Warning>
+Do not use the global `db` variable inside a hook. Always use the `tx` parameter to stay within the current transaction.
+</Warning>
+
+## All hook signatures
+
+```go
+// BeforeCreate called before inserting a record
+func (u *User) BeforeCreate(tx *gorm.DB) error
+
+// AfterCreate called after inserting a record
+func (u *User) AfterCreate(tx *gorm.DB) error
+
+// BeforeSave called before Create or Update
+func (u *User) BeforeSave(tx *gorm.DB) error
+
+// AfterSave called after Create or Update
+func (u *User) AfterSave(tx *gorm.DB) error
+
+// BeforeUpdate called before updating a record
+func (u *User) BeforeUpdate(tx *gorm.DB) error
+
+// AfterUpdate called after updating a record
+func (u *User) AfterUpdate(tx *gorm.DB) error
+
+// BeforeDelete called before deleting a record
+func (u *User) BeforeDelete(tx *gorm.DB) error
+
+// AfterDelete called after deleting a record
+func (u *User) AfterDelete(tx *gorm.DB) error
+
+// AfterFind called after a query (Find, First, Last, etc.)
+func (u *User) AfterFind(tx *gorm.DB) error
+```
+
+## Skipping hooks
+
+Create a session with `SkipHooks: true` to bypass all hooks for that operation.
+
+```go
+db.Session(&gorm.Session{SkipHooks: true}).Create(&user)
+db.Session(&gorm.Session{SkipHooks: true}).Delete(&user)
+```
+
+<Note>
+`UpdateColumn` and `UpdateColumns` skip hooks by default — they bypass the callback pipeline entirely and write directly to the database.
+</Note>
+
+## Registering callbacks programmatically
+
+Beyond model methods, you can register callbacks globally on the `db` instance using the callback manager. This is useful for cross-cutting concerns like auditing or tracing.
+
+```go
+// Register a callback that runs before every create operation
+db.Callback().Create().Before("gorm:create").Register("audit:before_create", func(db *gorm.DB) {
+    if db.Statement.Schema != nil {
+        fmt.Printf("creating record in table: %s\n", db.Statement.Table)
+    }
+})
+
+// Remove an existing callback
+db.Callback().Delete().Remove("gorm:delete")
+
+// Replace an existing callback with a custom implementation
+db.Callback().Update().Replace("gorm:update", myCustomUpdateFunc)
+```
+
+Callback processors support `Before`, `After`, `Match`, `Register`, `Remove`, and `Replace` methods for fine-grained control over execution order.

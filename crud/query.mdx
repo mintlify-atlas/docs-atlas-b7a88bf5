@@ -1,0 +1,417 @@
+---
+title: "Querying records"
+description: "Retrieve single records, query with conditions, order, paginate, group, join, count, and process results in batches using GORM's query API."
+---
+
+## Retrieving a single record
+
+GORM provides three methods for fetching a single row. All three set `ErrRecordNotFound` on the returned `*DB` if no match exists.
+
+<AccordionGroup>
+  <Accordion title="First — ordered by primary key ascending">
+    ```go
+    var user User
+
+    // SELECT * FROM users ORDER BY id LIMIT 1;
+    result := db.First(&user)
+
+    fmt.Println(result.RowsAffected) // 1
+    fmt.Println(result.Error)        // gorm.ErrRecordNotFound if not found
+    ```
+
+    Pass inline conditions as the second argument:
+
+    ```go
+    // SELECT * FROM users WHERE id = 10 ORDER BY id LIMIT 1;
+    db.First(&user, 10)
+
+    // SELECT * FROM users WHERE name = 'Jinzhu' ORDER BY id LIMIT 1;
+    db.First(&user, "name = ?", "Jinzhu")
+    ```
+  </Accordion>
+  <Accordion title="Take — no ordering guarantee">
+    ```go
+    var user User
+
+    // SELECT * FROM users LIMIT 1;
+    db.Take(&user)
+
+    // With condition:
+    db.Take(&user, "name = ?", "Jinzhu")
+    ```
+
+    `Take` omits the `ORDER BY` clause. Use it when you don't need a deterministic row and want to avoid the overhead of sorting.
+  </Accordion>
+  <Accordion title="Last — ordered by primary key descending">
+    ```go
+    var user User
+
+    // SELECT * FROM users ORDER BY id DESC LIMIT 1;
+    db.Last(&user)
+
+    // With condition:
+    db.Last(&user, "name = ?", "Jinzhu")
+    ```
+  </Accordion>
+</AccordionGroup>
+
+<Note>
+`First`, `Take`, and `Last` return `gorm.ErrRecordNotFound` when no row matches. Use `db.Find` if you want an empty result without an error.
+</Note>
+
+## Retrieving multiple records
+
+```go
+var users []User
+
+// SELECT * FROM users;
+db.Find(&users)
+
+fmt.Println(len(users)) // total number of users
+```
+
+### Find by primary keys
+
+```go
+var users []User
+
+// SELECT * FROM users WHERE id IN (1, 2, 3);
+db.Find(&users, []int{1, 2, 3})
+
+// Single primary key (integer)
+db.Find(&users, 5)
+```
+
+## Conditions
+
+### String conditions
+
+```go
+var user User
+var users []User
+
+// Exact match
+// SELECT * FROM users WHERE name = 'Jinzhu' ORDER BY id LIMIT 1;
+db.Where("name = ?", "Jinzhu").First(&user)
+
+// Not equal
+db.Where("name <> ?", "Jinzhu").Find(&users)
+
+// IN
+db.Where("name IN ?", []string{"Jinzhu", "Jackson"}).Find(&users)
+
+// LIKE
+db.Where("name LIKE ?", "%jin%").Find(&users)
+
+// AND
+db.Where("name = ? AND age >= ?", "Jinzhu", 18).First(&user)
+
+// Time comparison
+db.Where("updated_at > ?", lastWeek).Find(&users)
+
+// BETWEEN
+db.Where("created_at BETWEEN ? AND ?", lastWeek, today).Find(&users)
+```
+
+### Struct conditions
+
+Non-zero fields are used as equality conditions. Zero-value fields (empty string, 0, false) are ignored.
+
+```go
+// SELECT * FROM users WHERE name = 'Jinzhu' AND age = 20 ORDER BY id LIMIT 1;
+db.Where(&User{Name: "Jinzhu", Age: 20}).First(&user)
+
+// Age is zero — only Name is used as a condition
+db.Where(&User{Name: "Jinzhu", Age: 0}).Find(&users)
+// SELECT * FROM users WHERE name = 'Jinzhu';
+```
+
+<Tip>
+Use a map when you need to filter on zero values.
+</Tip>
+
+### Map conditions
+
+```go
+// All map keys are used, including zero values
+db.Where(map[string]interface{}{"name": "Jinzhu", "age": 20}).Find(&users)
+// SELECT * FROM users WHERE name = 'Jinzhu' AND age = 20;
+
+// Zero values in maps are respected
+db.Where(map[string]interface{}{"age": 0}).Find(&users)
+// SELECT * FROM users WHERE age = 0;
+```
+
+### Inline conditions
+
+Conditions can be passed directly to `First`, `Take`, `Last`, and `Find` without an explicit `Where`:
+
+```go
+// By primary key
+db.First(&user, 23)
+
+// String condition
+db.Find(&users, "name <> ? AND age > ?", "Jinzhu", 20)
+
+// Struct condition
+db.Find(&users, User{Age: 20})
+
+// Map condition
+db.Find(&users, map[string]interface{}{"age": 20})
+```
+
+## NOT conditions
+
+`Not` works like `Where` but negates the condition:
+
+```go
+// SELECT * FROM users WHERE NOT name = 'Jinzhu' ORDER BY id LIMIT 1;
+db.Not("name = ?", "Jinzhu").First(&user)
+
+// NOT IN
+db.Not(map[string]interface{}{"name": []string{"Jinzhu", "Jackson"}}).Find(&users)
+
+// Struct: NOT (name = 'Jinzhu' AND age = 18)
+db.Not(User{Name: "Jinzhu", Age: 18}).First(&user)
+
+// NOT IN by primary key
+db.Not([]int{1, 2, 3}).First(&user)
+```
+
+## OR conditions
+
+```go
+// SELECT * FROM users WHERE name = 'Jinzhu' OR name = 'Jackson';
+db.Where("name = ?", "Jinzhu").Or("name = ?", "Jackson").Find(&users)
+
+// Struct OR
+db.Where("name = 'Jinzhu'").Or(User{Name: "Jackson", Age: 20}).Find(&users)
+
+// Map OR
+db.Where("name = 'Jinzhu'").Or(map[string]interface{}{"name": "Jackson", "age": 20}).Find(&users)
+```
+
+## Selecting specific fields
+
+By default GORM selects all columns. Use `Select` to limit the columns returned.
+
+```go
+// SELECT name, email FROM users;
+db.Select("name", "email").Find(&users)
+
+// Array form
+db.Select([]string{"name", "email"}).Find(&users)
+
+// SQL expression
+db.Select("COALESCE(age, ?)", 42).Find(&users)
+```
+
+## Ordering
+
+```go
+// SELECT * FROM users ORDER BY age DESC;
+db.Order("age DESC").Find(&users)
+
+// Multiple columns
+db.Order("age DESC").Order("name").Find(&users)
+// SELECT * FROM users ORDER BY age DESC, name;
+
+// Using clause.OrderByColumn for programmatic construction
+db.Order(clause.OrderByColumn{
+  Column: clause.Column{Name: "age"},
+  Desc:   true,
+}).Find(&users)
+```
+
+## Limit and offset
+
+```go
+// SELECT * FROM users LIMIT 3;
+db.Limit(3).Find(&users)
+
+// SELECT * FROM users LIMIT 10 OFFSET 5;
+db.Limit(10).Offset(5).Find(&users)
+
+// Cancel a limit set earlier in the chain
+db.Limit(3).Find(&users1).Limit(-1).Find(&users2)
+// users1 → 3 rows; users2 → all rows
+```
+
+## Group by and Having
+
+```go
+type AgeResult struct {
+  Name  string
+  Total int
+}
+var results []AgeResult
+
+// SELECT name, SUM(age) AS total FROM users GROUP BY name;
+db.Model(&User{}).
+  Select("name, sum(age) as total").
+  Group("name").
+  Find(&results)
+
+// With HAVING
+// SELECT name, SUM(age) AS total FROM users GROUP BY name HAVING name = 'Jinzhu';
+db.Model(&User{}).
+  Select("name, sum(age) as total").
+  Group("name").
+  Having("name = ?", "Jinzhu").
+  Find(&results)
+```
+
+## Joins
+
+### Raw SQL join
+
+```go
+type UserWithEmail struct {
+  UserID uint
+  Name   string
+  Email  string
+}
+var results []UserWithEmail
+
+db.Model(&User{}).
+  Select("users.id as user_id, users.name, emails.email").
+  Joins("JOIN emails ON emails.user_id = users.id AND emails.email = ?", "jinzhu@example.org").
+  Scan(&results)
+```
+
+### Association join (eager loading)
+
+```go
+// LEFT JOIN accounts ON accounts.user_id = users.id
+db.Joins("Account").Find(&users)
+
+// With additional conditions on the joined association
+db.Joins("Account", db.Select("id").
+  Where("user_id = users.id AND name = ?", "someName").
+  Model(&Account{}),
+).Find(&users)
+```
+
+### Inner join
+
+```go
+db.InnerJoins("Account").Find(&users)
+```
+
+## Distinct
+
+```go
+// SELECT DISTINCT name FROM users;
+db.Distinct("name").Find(&results)
+
+// Multiple columns
+db.Distinct("name", "age").Find(&results)
+```
+
+## Counting records
+
+```go
+var count int64
+
+// COUNT(*) across all users
+db.Model(&User{}).Count(&count)
+
+// COUNT with a condition
+db.Model(&User{}).Where("name = ?", "Jinzhu").Count(&count)
+
+// COUNT on a specific column
+db.Model(&User{}).Select("name").Count(&count)
+
+// COUNT DISTINCT
+db.Model(&User{}).Distinct("name").Count(&count)
+```
+
+## Pluck — single column
+
+`Pluck` queries a single column and returns the values as a slice:
+
+```go
+var names []string
+db.Model(&User{}).Pluck("name", &names)
+// SELECT name FROM users;
+
+var ages []int64
+db.Model(&User{}).Where("name = ?", "Jinzhu").Pluck("age", &ages)
+
+// Distinct Pluck
+var distinctNames []string
+db.Model(&User{}).Distinct().Pluck("name", &distinctNames)
+// SELECT DISTINCT name FROM users;
+
+// Pluck multiple columns using Scan
+type Result struct {
+  Name string
+  Age  int
+}
+var results []Result
+db.Model(&User{}).Select("name, age").Scan(&results)
+```
+
+## Batch processing with FindInBatches
+
+Use `FindInBatches` to process large result sets in chunks without loading all rows into memory at once. GORM uses keyset pagination internally (ordering by primary key) to avoid offset-based slowdowns.
+
+```go
+var users []User
+
+db.Where("age > ?", 18).FindInBatches(&users, 100, func(tx *gorm.DB, batch int) error {
+  for _, u := range users {
+    // process each record
+    fmt.Println(u.Name)
+  }
+
+  // tx.RowsAffected holds the count for this batch
+  // batch is the current batch number (1-indexed)
+
+  // Return an error to stop processing early
+  return nil
+})
+```
+
+<Note>
+`FindInBatches` requires a primary key on the model. It returns `gorm.ErrPrimaryKeyRequired` if none is found.
+</Note>
+
+## Scan — arbitrary structs
+
+`Scan` works like `Find` but maps columns to any struct, not just GORM models. It's useful for custom projections, aggregations, and joins that don't map to a model.
+
+```go
+type Stats struct {
+  Name  string
+  Total int64
+}
+var stats Stats
+
+db.Model(&User{}).
+  Select("name, count(*) as total").
+  Where("name = ?", "Jinzhu").
+  Group("name").
+  Scan(&stats)
+
+// Scan a slice
+var allStats []Stats
+db.Model(&User{}).
+  Select("name, count(*) as total").
+  Group("name").
+  Scan(&allStats)
+```
+
+## Error handling
+
+```go
+result := db.First(&user, 1)
+if errors.Is(result.Error, gorm.ErrRecordNotFound) {
+  // no matching record
+}
+
+result = db.Find(&users)
+if result.Error != nil {
+  // query failed
+}
+```

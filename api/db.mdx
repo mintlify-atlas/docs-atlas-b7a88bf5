@@ -1,0 +1,255 @@
+---
+title: 'DB'
+description: 'The core DB type, the Open function, and utility methods for configuring and managing your database connection.'
+---
+
+The `DB` struct is the central type in GORM. Every query, transaction, and database operation is performed through a `*DB` instance.
+
+## Type definition
+
+```go
+type DB struct {
+    *Config
+    Error        error
+    RowsAffected int64
+    Statement    *Statement
+    clone        int
+}
+```
+
+## Public fields
+
+<ResponseField name="Error" type="error">
+  The last error that occurred on this DB instance. Always check this field (or the returned `*DB`) after finisher methods. Errors accumulate via `AddError`.
+</ResponseField>
+
+<ResponseField name="RowsAffected" type="int64">
+  The number of rows affected by the last create, update, or delete operation. For queries it reflects the number of rows returned.
+</ResponseField>
+
+## Open
+
+```go
+func Open(dialector Dialector, opts ...Option) (db *DB, err error)
+```
+
+Initializes a new database session using the given dialector and optional configuration options. `Open` applies all options, initializes callbacks, connects the dialector, and (by default) pings the database to verify connectivity.
+
+```go
+import (
+    "gorm.io/gorm"
+    "gorm.io/driver/postgres"
+)
+
+db, err := gorm.Open(postgres.Open(dsn), &gorm.Config{})
+if err != nil {
+    log.Fatal("failed to connect to database:", err)
+}
+```
+
+<Note>
+  `Open` sorts options so that a `*Config` value is always applied first, before any other options.
+</Note>
+
+### Parameters
+
+<ParamField path="dialector" type="Dialector" required>
+  The database driver implementation. Import a driver package (e.g., `gorm.io/driver/postgres`) and call its `Open` function to obtain a `Dialector`.
+</ParamField>
+
+<ParamField path="opts" type="...Option">
+  Zero or more options. A `*Config` struct implements `Option` and is the standard way to configure GORM behaviour. Other options can modify individual config fields.
+</ParamField>
+
+## Utility methods
+
+### DB
+
+```go
+func (db *DB) DB() (*sql.DB, error)
+```
+
+Returns the underlying `*sql.DB` connection pool. Use this to set pool parameters such as `SetMaxOpenConns`, `SetMaxIdleConns`, and `SetConnMaxLifetime`.
+
+```go
+sqlDB, err := db.DB()
+if err != nil {
+    return err
+}
+sqlDB.SetMaxOpenConns(25)
+sqlDB.SetMaxIdleConns(5)
+```
+
+---
+
+### WithContext
+
+```go
+func (db *DB) WithContext(ctx context.Context) *DB
+```
+
+Returns a new `*DB` that uses the given context for all subsequent operations. Equivalent to `db.Session(&Session{Context: ctx})`.
+
+```go
+ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+defer cancel()
+
+var user User
+db.WithContext(ctx).First(&user, 1)
+```
+
+---
+
+### Debug
+
+```go
+func (db *DB) Debug() *DB
+```
+
+Returns a new `*DB` with the log level set to `Info`, causing all SQL statements to be printed. Useful during development.
+
+```go
+db.Debug().Where("name = ?", "jinzhu").First(&user)
+```
+
+---
+
+### Session
+
+```go
+func (db *DB) Session(config *Session) *DB
+```
+
+Creates a new session from the current DB, applying all settings in `*Session`. This is the primary way to create scoped DB instances that inherit the current state without mutating it. See [Session](/api/session) for full field documentation.
+
+```go
+tx := db.Session(&gorm.Session{
+    PrepareStmt: true,
+    Logger:      myLogger,
+})
+```
+
+---
+
+### Set / Get
+
+```go
+func (db *DB) Set(key string, value interface{}) *DB
+func (db *DB) Get(key string) (interface{}, bool)
+```
+
+Store and retrieve arbitrary values in the current statement's shared settings map. Values set here are accessible to callbacks and plugins.
+
+```go
+tx := db.Set("gorm:table_options", "ENGINE=InnoDB")
+value, ok := tx.Get("gorm:table_options")
+```
+
+---
+
+### InstanceSet / InstanceGet
+
+```go
+func (db *DB) InstanceSet(key string, value interface{}) *DB
+func (db *DB) InstanceGet(key string) (interface{}, bool)
+```
+
+Like `Set`/`Get`, but keys are namespaced to the current `*Statement` pointer. This prevents key collisions when multiple statements share the same underlying settings map.
+
+---
+
+### Callback
+
+```go
+func (db *DB) Callback() *callbacks
+```
+
+Returns the callback manager, which lets you register, replace, or remove callbacks for the create, query, update, delete, and raw operations.
+
+```go
+db.Callback().Create().Before("gorm:create").Register("my_plugin:before_create", func(db *gorm.DB) {
+    // custom logic
+})
+```
+
+---
+
+### AddError
+
+```go
+func (db *DB) AddError(err error) error
+```
+
+Appends an error to `db.Error`. If `Config.TranslateError` is enabled and the dialector implements `ErrorTranslator`, the error is translated before being stored. Subsequent errors are chained with `fmt.Errorf("%v; %w", ...)`. Returns the current accumulated error.
+
+---
+
+### Use
+
+```go
+func (db *DB) Use(plugin Plugin) error
+```
+
+Registers a plugin with GORM. Calls `plugin.Initialize(db)` and stores the plugin by its name. Returns `ErrRegistered` if a plugin with the same name is already registered.
+
+```go
+if err := db.Use(prometheus.New(prometheus.Config{})); err != nil {
+    log.Fatal(err)
+}
+```
+
+---
+
+### SetupJoinTable
+
+```go
+func (db *DB) SetupJoinTable(model interface{}, field string, joinTable interface{}) error
+```
+
+Configures a custom join table struct for a many-to-many relationship. The join table model can carry extra fields beyond the two foreign keys.
+
+```go
+type UserFriend struct {
+    UserID   uint
+    FriendID uint
+    Since    time.Time
+}
+
+db.SetupJoinTable(&User{}, "Friends", &UserFriend{})
+```
+
+---
+
+### ToSQL
+
+```go
+func (db *DB) ToSQL(queryFn func(tx *DB) *DB) string
+```
+
+Executes `queryFn` in dry-run mode and returns the generated SQL string with all bind variables interpolated. The database is not queried.
+
+```go
+sql := db.ToSQL(func(tx *gorm.DB) *gorm.DB {
+    return tx.Model(&User{}).Where("name = ?", "jinzhu").Find(&[]User{})
+})
+// sql => SELECT * FROM `users` WHERE name = 'jinzhu'
+```
+
+<Warning>
+  `ToSQL` skips the default transaction wrapper. Do not rely on transaction behaviour within `queryFn`.
+</Warning>
+
+---
+
+### Expr
+
+```go
+func Expr(expr string, args ...interface{}) clause.Expr
+```
+
+Package-level function that wraps a raw SQL fragment and its arguments into a `clause.Expr`. Use it anywhere GORM accepts an `interface{}` value to pass a SQL expression instead of a literal.
+
+```go
+// Increment a counter without loading the record
+db.Model(&product).Update("price", gorm.Expr("price * ? + ?", 0.9, 10))
+```

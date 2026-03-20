@@ -1,0 +1,177 @@
+---
+title: Auto migrate
+description: Keep your database schema in sync with your Go model definitions using GORM's migration tools.
+---
+
+GORM's `AutoMigrate` function compares your model definitions against the live schema and applies any missing tables, columns, and indexes. It is non-destructive by design: it never drops columns or changes existing column types.
+
+## Running AutoMigrate
+
+Pass one or more model pointers to `db.AutoMigrate`. It runs the migration inside a single call.
+
+```go
+err := db.AutoMigrate(&User{}, &Product{}, &Order{})
+if err != nil {
+    log.Fatal(err)
+}
+```
+
+`AutoMigrate` is safe to run every time your application starts. It checks the schema first and only applies changes when needed.
+
+## What AutoMigrate does
+
+<AccordionGroup>
+  <Accordion title="Creates missing tables">
+    If a table for a model does not exist, AutoMigrate creates it with all columns, primary keys, unique constraints, and indexes defined in the struct.
+  </Accordion>
+
+  <Accordion title="Adds missing columns">
+    If a column defined in the struct is absent from the existing table, AutoMigrate adds it. Existing rows receive the column's zero value or DEFAULT.
+  </Accordion>
+
+  <Accordion title="Creates missing indexes">
+    Indexes defined via struct tags (e.g., `gorm:"index"`, `gorm:"uniqueIndex"`) that are not present in the database are created.
+  </Accordion>
+
+  <Accordion title="Does NOT drop columns or change types">
+    AutoMigrate never removes columns that exist in the database but not in the struct, and it does not alter column types. Make those changes manually using the Migrator interface or raw SQL.
+  </Accordion>
+</AccordionGroup>
+
+## Migrator interface
+
+`db.Migrator()` returns a `Migrator` that exposes the full schema management API. Use it when you need precise control over migration steps.
+
+```go
+migrator := db.Migrator()
+```
+
+### Table operations
+
+```go
+// Check whether a table exists
+has := migrator.HasTable(&User{})
+has = migrator.HasTable("users") // also accepts a table name string
+
+// Create a table from a model
+migrator.CreateTable(&User{})
+
+// Drop a table (destructive — use with care)
+migrator.DropTable(&User{}, &Product{})
+
+// Rename a table
+migrator.RenameTable(&User{}, &Member{})    // using model types
+migrator.RenameTable("users", "members")    // using string names
+
+// List all tables in the current database
+tables, err := migrator.GetTables()
+
+// Get the current database name
+dbName := migrator.CurrentDatabase()
+```
+
+### Column operations
+
+```go
+// Check whether a column exists
+has := migrator.HasColumn(&User{}, "Name")
+has = migrator.HasColumn(&User{}, "name") // GORM resolves the DB column name
+
+// Add a column from a model field
+migrator.AddColumn(&User{}, "Bio")
+
+// Drop a column
+migrator.DropColumn(&User{}, "Bio")
+
+// Rename a column
+migrator.RenameColumn(&User{}, "Name", "FullName")
+
+// Alter a column type to match the struct field definition
+migrator.AlterColumn(&User{}, "Name")
+
+// Inspect column types
+types, err := migrator.ColumnTypes(&User{})
+for _, ct := range types {
+    fmt.Println(ct.Name(), ct.DatabaseTypeName())
+}
+```
+
+### Index operations
+
+```go
+// Check whether an index exists
+has := migrator.HasIndex(&User{}, "idx_user_name")
+
+// Create an index defined in the struct tags
+migrator.CreateIndex(&User{}, "idx_user_name")
+
+// Drop an index
+migrator.DropIndex(&User{}, "idx_user_name")
+
+// Rename an index
+migrator.RenameIndex(&User{}, "idx_user_name", "idx_name")
+
+// List all indexes on a model's table
+indexes, err := migrator.GetIndexes(&User{})
+```
+
+### View operations
+
+```go
+// Create a view
+migrator.CreateView("active_users", gorm.ViewOption{
+    Replace: true,
+    Query:   db.Model(&User{}).Where("active = ?", true),
+})
+
+// Drop a view
+migrator.DropView("active_users")
+```
+
+## Configuration options
+
+### DisableForeignKeyConstraintWhenMigrating
+
+Prevent GORM from creating foreign key constraints during migration. Useful when you manage FK constraints separately or when your database user lacks the required privileges.
+
+```go
+db, err := gorm.Open(postgres.Open(dsn), &gorm.Config{
+    DisableForeignKeyConstraintWhenMigrating: true,
+})
+```
+
+### IgnoreRelationshipsWhenMigrating
+
+Skip processing associations during `AutoMigrate`. GORM will only migrate the columns defined directly on the model, not those implied by `has many`, `belongs to`, etc.
+
+```go
+db, err := gorm.Open(postgres.Open(dsn), &gorm.Config{
+    IgnoreRelationshipsWhenMigrating: true,
+})
+```
+
+## Migration in production
+
+<Warning>
+`AutoMigrate` is convenient for development but can be risky in production. For production environments, consider generating explicit migration files that you can review, version-control, and roll back.
+</Warning>
+
+<Steps>
+  <Step title="Generate the SQL first">
+    Use DryRun mode or inspect `migrator.ColumnTypes` to understand what changes will be applied before running them.
+  </Step>
+
+  <Step title="Back up your data">
+    Always take a database backup before running any schema migration in production.
+  </Step>
+
+  <Step title="Run migrations in a transaction where supported">
+    Some databases (PostgreSQL, CockroachDB) support transactional DDL. Wrap your migration in a transaction so it can be rolled back on failure.
+
+    ```go
+    err := db.Transaction(func(tx *gorm.DB) error {
+        return tx.AutoMigrate(&User{}, &Product{})
+    })
+    ```
+  </Step>
+</Steps>

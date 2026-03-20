@@ -1,0 +1,154 @@
+---
+title: Transactions
+description: Manage database transactions with GORM using automatic, block-based, and manual approaches.
+---
+
+GORM wraps single create, update, and delete operations in a transaction by default to ensure data integrity. You can also manage transactions explicitly for multi-step operations.
+
+## Automatic transactions
+
+Every call to `Create`, `Update`, and `Delete` runs inside an implicit transaction. If the operation succeeds it commits; if anything fails it rolls back.
+
+Disable this behavior globally when you need better performance for high-throughput, single-operation workloads:
+
+```go
+db, err := gorm.Open(sqlite.Open("test.db"), &gorm.Config{
+    SkipDefaultTransaction: true,
+})
+```
+
+Or disable it for a single session:
+
+```go
+tx := db.Session(&gorm.Session{SkipDefaultTransaction: true})
+tx.Create(&user) // no wrapping transaction
+```
+
+## Transaction block
+
+Use `db.Transaction` to run multiple operations inside a single transaction. Return an error to roll back; return `nil` to commit.
+
+```go
+err := db.Transaction(func(tx *gorm.DB) error {
+    if err := tx.Create(&User{Name: "Alice"}).Error; err != nil {
+        return err // rollback
+    }
+
+    if err := tx.Create(&Order{UserID: 1, Amount: 100}).Error; err != nil {
+        return err // rollback
+    }
+
+    return nil // commit
+})
+```
+
+<Note>
+GORM automatically rolls back the transaction if the callback panics, in addition to when an error is returned.
+</Note>
+
+## Manual transactions
+
+Use `Begin`, `Commit`, and `Rollback` when you need explicit control over transaction boundaries.
+
+```go
+tx := db.Begin()
+
+if err := tx.Create(&user).Error; err != nil {
+    tx.Rollback()
+    return err
+}
+
+if err := tx.Update("email", user.Email).Error; err != nil {
+    tx.Rollback()
+    return err
+}
+
+return tx.Commit().Error
+```
+
+Pass `*sql.TxOptions` to `Begin` to set isolation level or read-only mode:
+
+```go
+import "database/sql"
+
+tx := db.Begin(&sql.TxOptions{
+    Isolation: sql.LevelSerializable,
+    ReadOnly:  false,
+})
+```
+
+## Nested transactions
+
+When you call `db.Transaction` inside an existing transaction, GORM automatically creates a savepoint instead of starting a new transaction. Rolling back only undoes the work done since that savepoint.
+
+```go
+err := db.Transaction(func(tx *gorm.DB) error {
+    tx.Create(&User{Name: "outer"})
+
+    // nested — uses a savepoint internally
+    err := tx.Transaction(func(tx2 *gorm.DB) error {
+        tx2.Create(&User{Name: "inner"})
+        return errors.New("inner failed") // rolls back only the inner work
+    })
+
+    // outer transaction continues
+    tx.Create(&User{Name: "outer-2"})
+    return nil
+})
+```
+
+Disable nested transaction support to treat every `db.Transaction` call as a top-level transaction:
+
+```go
+db, err := gorm.Open(sqlite.Open("test.db"), &gorm.Config{
+    DisableNestedTransaction: true,
+})
+```
+
+## Savepoints
+
+Create and roll back to named savepoints manually with `SavePoint` and `RollbackTo`.
+
+```go
+tx := db.Begin()
+
+tx.Create(&User{Name: "Alice"})
+tx.SavePoint("sp1")
+
+tx.Create(&User{Name: "Bob"})
+tx.RollbackTo("sp1") // undoes Bob, keeps Alice
+
+tx.Commit()
+```
+
+<Warning>
+Savepoints are not supported by all database drivers. Check your driver's documentation before relying on them.
+</Warning>
+
+## Transaction timeout
+
+Set a default timeout for all transactions so that long-running operations are automatically cancelled:
+
+```go
+db, err := gorm.Open(postgres.Open(dsn), &gorm.Config{
+    DefaultTransactionTimeout: 30 * time.Second,
+})
+```
+
+If the transaction's context already has a deadline, GORM respects it and does not apply `DefaultTransactionTimeout`.
+
+## Using context with transactions
+
+Pass a context to a transaction to support cancellation and deadlines:
+
+```go
+ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+defer cancel()
+
+err := db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+    if err := tx.Create(&user).Error; err != nil {
+        return err
+    }
+    return nil
+})
+```

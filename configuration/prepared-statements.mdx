@@ -1,0 +1,206 @@
+---
+title: "Prepared statements"
+description: "Enable GORM's prepared statement cache to reduce query parse overhead and improve throughput."
+---
+
+When prepared statements are enabled, GORM sends each unique SQL string to the database once, receives a compiled statement handle, and then reuses that handle for every subsequent execution of the same query. This eliminates the parse-and-plan step on repeated queries, which can meaningfully reduce latency on high-throughput workloads.
+
+## Enabling prepared statements globally
+
+Set `PrepareStmt: true` in `gorm.Config` when opening the database:
+
+```go
+import (
+    "gorm.io/gorm"
+    "gorm.io/driver/postgres"
+)
+
+db, err := gorm.Open(postgres.Open(dsn), &gorm.Config{
+    PrepareStmt: true,
+})
+```
+
+Once enabled, every query — including `Find`, `Create`, `Update`, and `Delete` — automatically goes through the prepared statement cache.
+
+## Enabling prepared statements per session
+
+If you only want prepared statements for a subset of operations, enable them on a session:
+
+```go
+tx := db.Session(&gorm.Session{
+    PrepareStmt: true,
+})
+
+// These queries use prepared statements
+tx.Find(&users)
+tx.Where("age > ?", 18).Find(&adults)
+
+// This query uses the original db and is unaffected
+db.Find(&allUsers)
+```
+
+A session-level cache shares the same underlying statement store as any existing global cache. If the parent `db` already has a cache, the session attaches to it rather than creating a new one.
+
+## Cache configuration
+
+### LRU cache size
+
+<ParamField path="PrepareStmtMaxSize" type="int" default="math.MaxInt64 (unlimited)">
+  The maximum number of prepared statements the cache holds at one time. When the limit is reached, the least recently used statement is closed and removed before the new one is added.
+
+  ```go
+  db, err := gorm.Open(dialector, &gorm.Config{
+      PrepareStmt:        true,
+      PrepareStmtMaxSize: 200, // keep at most 200 compiled statements
+  })
+  ```
+
+  Keep this value proportional to your query diversity. A limit that is too small causes frequent eviction and re-preparation, negating the performance benefit.
+</ParamField>
+
+### Cache TTL
+
+<ParamField path="PrepareStmtTTL" type="time.Duration" default="1h">
+  How long a cached statement is considered valid. After the TTL elapses the entry is evicted, and the SQL is re-prepared on the next use.
+
+  ```go
+  db, err := gorm.Open(dialector, &gorm.Config{
+      PrepareStmt:    true,
+      PrepareStmtTTL: 15 * time.Minute,
+  })
+  ```
+
+  A shorter TTL reduces the risk of holding stale prepared statements after schema changes, but increases re-preparation frequency.
+</ParamField>
+
+## How the cache works
+
+The cache is backed by `PreparedStmtDB`, which wraps a `ConnPool` and intercepts every `ExecContext`, `QueryContext`, and `QueryRowContext` call:
+
+```go
+type PreparedStmtDB struct {
+    Stmts    stmt_store.Store // LRU store with TTL support
+    Mux      *sync.RWMutex   // guards concurrent access
+    ConnPool                 // underlying connection pool
+}
+```
+
+On each operation:
+
+1. The SQL string is used as the cache key.
+2. An `RLock` is acquired to check whether the statement already exists in the store.
+3. If found and valid, the cached `*sql.Stmt` is used directly.
+4. If not found, the lock is promoted to a write lock, the statement is prepared via the underlying `ConnPool`, and the result is stored.
+5. If the driver returns `driver.ErrBadConn`, the cache entry is deleted so it will be re-prepared on the next attempt.
+
+Concurrent goroutines read from the cache simultaneously under the read lock, so cache hits are non-blocking.
+
+## Transactions
+
+Inside a transaction, GORM automatically switches from `PreparedStmtDB` to `PreparedStmtTX`, which wraps the transaction's `Tx` interface:
+
+```go
+type PreparedStmtTX struct {
+    Tx                      // the active transaction
+    PreparedStmtDB *PreparedStmtDB // shared statement cache
+}
+```
+
+`PreparedStmtTX` calls `tx.StmtContext` to bind each cached statement to the current transaction before executing it, which is required by `database/sql`.
+
+<Warning>
+  Prepared statements are not compatible with `SavePoint` and `RollbackTo`. If you use nested transactions via savepoints, do not enable prepared statements on the same session.
+</Warning>
+
+## Closing and resetting the cache
+
+Call `Close` on the `PreparedStmtDB` to release all cached statements:
+
+```go
+// Retrieve the PreparedStmtDB from the connection pool
+sqlDB, err := db.DB()
+if err != nil {
+    panic(err)
+}
+
+if pdb, ok := db.ConnPool.(*gorm.PreparedStmtDB); ok {
+    pdb.Close()
+}
+```
+
+`Close` acquires the write lock, iterates over all cached statement keys, and deletes each one from the store. After calling `Close`, the cache is empty and new statements will be re-prepared on the next use.
+
+<Note>
+  `Reset()` is a deprecated alias for `Close()`. Use `Close()` in new code.
+</Note>
+
+## Performance considerations
+
+<AccordionGroup>
+  <Accordion title="When prepared statements help most">
+    Prepared statements have the greatest impact when:
+
+    - The same SQL shape is executed many times (e.g., point lookups by primary key).
+    - The database's query planner is relatively expensive (common in PostgreSQL).
+    - Connection pooling reuses connections long enough for cached statements to be used repeatedly.
+
+    For workloads with highly dynamic SQL (e.g., full-text search with varying clause structures), the cache hit rate will be low and the benefit minimal.
+  </Accordion>
+
+  <Accordion title="Prepared statements and schema changes">
+    Prepared statements are compiled against the schema at the time of preparation. If you run a migration that changes a table used by a cached statement (adding a column, changing a type), the cached statement may become stale.
+
+    Mitigate this by:
+
+    - Calling `pdb.Close()` after running migrations to flush the cache.
+    - Setting a short `PrepareStmtTTL` if schema changes happen frequently.
+    - Disabling prepared statements during migration sessions.
+
+    ```go
+    // Disable prepared statements for the migration session
+    migrationDB := db.Session(&gorm.Session{
+        PrepareStmt: false,
+    })
+    migrationDB.AutoMigrate(&User{})
+    ```
+  </Accordion>
+
+  <Accordion title="Cache size tuning">
+    A rough starting point for `PrepareStmtMaxSize` is the number of distinct SQL patterns your application generates. You can estimate this by:
+
+    1. Running with `PrepareStmt: true` and no size limit.
+    2. Observing how many entries accumulate in the cache during a representative load test.
+    3. Setting `PrepareStmtMaxSize` to 110–120% of that observed count to allow headroom.
+
+    If the cache size is significantly constrained, monitor your database server's prepared statement metrics to confirm hit rates are acceptable.
+  </Accordion>
+</AccordionGroup>
+
+## Types reference
+
+### PreparedStmtDB
+
+`PreparedStmtDB` is the cached connection pool that replaces `db.ConnPool` when `PrepareStmt` is enabled globally.
+
+| Method | Description |
+|---|---|
+| `ExecContext` | Prepares (or retrieves) and executes a statement |
+| `QueryContext` | Prepares (or retrieves) and queries rows |
+| `QueryRowContext` | Prepares (or retrieves) and queries a single row |
+| `BeginTx` | Starts a transaction, returning a `PreparedStmtTX` |
+| `GetDBConn` | Returns the underlying `*sql.DB` |
+| `Close` | Closes and removes all cached statements |
+| `Ping` | Delegates to the underlying connection pool |
+
+### PreparedStmtTX
+
+`PreparedStmtTX` wraps an active `*sql.Tx` and binds cached statements to the transaction context before execution.
+
+| Method | Description |
+|---|---|
+| `ExecContext` | Binds cached statement to `tx` and executes |
+| `QueryContext` | Binds cached statement to `tx` and queries rows |
+| `QueryRowContext` | Binds cached statement to `tx` and queries one row |
+| `Commit` | Commits the transaction |
+| `Rollback` | Rolls back the transaction |
+| `GetDBConn` | Returns the underlying `*sql.DB` |

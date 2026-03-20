@@ -1,0 +1,312 @@
+---
+title: 'Errors'
+description: 'Sentinel error variables defined by GORM. Use errors.Is to check for specific conditions after a database operation.'
+---
+
+GORM stores the last error from an operation on `db.Error`. Use the standard `errors.Is` function to check for specific sentinel errors — this works correctly even when errors are wrapped.
+
+```go
+result := db.First(&user, 100)
+if errors.Is(result.Error, gorm.ErrRecordNotFound) {
+    // record does not exist
+}
+```
+
+<Note>
+  All GORM errors are package-level `var` values, not types. Always use `errors.Is` rather than direct equality (`==`) so that wrapping is handled correctly.
+</Note>
+
+## Error reference
+
+<AccordionGroup>
+
+  <Accordion title="ErrRecordNotFound">
+
+**Message:** `record not found`
+
+**Occurs when:** `First`, `Take`, or `Last` is called and no record matches the conditions.
+
+**How to handle:**
+
+```go
+var user User
+if err := db.First(&user, "name = ?", "nobody").Error; err != nil {
+    if errors.Is(err, gorm.ErrRecordNotFound) {
+        // return 404 or a default value
+    }
+    // unexpected error
+}
+```
+
+`Find` does **not** return this error when the result set is empty — it returns a nil error with `RowsAffected == 0`.
+
+  </Accordion>
+
+  <Accordion title="ErrInvalidTransaction">
+
+**Message:** `invalid transaction`
+
+**Occurs when:** `Commit` or `Rollback` is called on a `*DB` that is not inside an active transaction, or when `Begin` cannot start a transaction because the pool does not implement `TxBeginner` or `ConnPoolBeginner`.
+
+```go
+tx := db.Begin()
+if errors.Is(tx.Error, gorm.ErrInvalidTransaction) {
+    // pool does not support transactions
+}
+```
+
+  </Accordion>
+
+  <Accordion title="ErrNotImplemented">
+
+**Message:** `not implemented`
+
+**Occurs when:** A dialector or migrator method is called that the driver has not implemented.
+
+  </Accordion>
+
+  <Accordion title="ErrMissingWhereClause">
+
+**Message:** `WHERE conditions required`
+
+**Occurs when:** An `Update`, `Updates`, or `Delete` is executed without any `WHERE` conditions and `Config.AllowGlobalUpdate` is `false` (the default).
+
+```go
+// This will fail with ErrMissingWhereClause
+db.Delete(&User{})
+
+// Correct — add a condition
+db.Where("age > ?", 18).Delete(&User{})
+
+// Or explicitly allow global operations
+db.Session(&gorm.Session{AllowGlobalUpdate: true}).Delete(&User{})
+```
+
+  </Accordion>
+
+  <Accordion title="ErrUnsupportedRelation">
+
+**Message:** `unsupported relations`
+
+**Occurs when:** `db.Association(column)` is called with a field name that does not correspond to a known relationship on the model schema.
+
+  </Accordion>
+
+  <Accordion title="ErrPrimaryKeyRequired">
+
+**Message:** `primary key required`
+
+**Occurs when:** An operation requires a primary key (e.g., `FindInBatches` pagination, or association operations) but the model has none defined or the value is zero.
+
+  </Accordion>
+
+  <Accordion title="ErrModelValueRequired">
+
+**Message:** `model value required`
+
+**Occurs when:** A `Model` or target value is required for an operation but was not provided.
+
+  </Accordion>
+
+  <Accordion title="ErrModelAccessibleFieldsRequired">
+
+**Message:** `model accessible fields required`
+
+**Occurs when:** GORM cannot find any accessible (readable/writable) fields on the model, usually because the struct has no exported fields.
+
+  </Accordion>
+
+  <Accordion title="ErrSubQueryRequired">
+
+**Message:** `sub query required`
+
+**Occurs when:** A clause expects a subquery value (e.g., using `*DB` as a condition argument) but none was provided.
+
+  </Accordion>
+
+  <Accordion title="ErrInvalidData">
+
+**Message:** `unsupported data`
+
+**Occurs when:** A value passed to a GORM method is of a type that cannot be handled (e.g., an unsupported type in `Select` args).
+
+  </Accordion>
+
+  <Accordion title="ErrUnsupportedDriver">
+
+**Message:** `unsupported driver`
+
+**Occurs when:** `db.SavePoint` or `db.RollbackTo` is called and the dialector does not implement `SavePointerDialectorInterface`.
+
+  </Accordion>
+
+  <Accordion title="ErrRegistered">
+
+**Message:** `registered`
+
+**Occurs when:** `db.Use(plugin)` is called with a plugin whose `Name()` is already registered.
+
+```go
+if err := db.Use(&MyPlugin{}); errors.Is(err, gorm.ErrRegistered) {
+    // plugin is already loaded
+}
+```
+
+  </Accordion>
+
+  <Accordion title="ErrInvalidField">
+
+**Message:** `invalid field`
+
+**Occurs when:** A referenced field name does not exist on the schema.
+
+  </Accordion>
+
+  <Accordion title="ErrEmptySlice">
+
+**Message:** `empty slice found`
+
+**Occurs when:** An empty slice is passed to `Create` or a related operation that requires at least one element.
+
+  </Accordion>
+
+  <Accordion title="ErrDryRunModeUnsupported">
+
+**Message:** `dry run mode unsupported`
+
+**Occurs when:** `Row()` or `Rows()` is called while dry-run mode is active. Dry run can only generate SQL for operations that return a `*DB`; it cannot simulate raw row scanning.
+
+  </Accordion>
+
+  <Accordion title="ErrInvalidDB">
+
+**Message:** `invalid db`
+
+**Occurs when:** `db.DB()` cannot resolve the underlying `*sql.DB` from the current connection pool — for example, when the pool is a custom type that does not implement `GetDBConnector`.
+
+  </Accordion>
+
+  <Accordion title="ErrInvalidValue">
+
+**Message:** `invalid value, should be pointer to struct or slice`
+
+**Occurs when:** A non-pointer or otherwise unsuitable value is passed to a method that requires a pointer to a struct or slice (e.g., `Association.Append` with an un-addressable struct).
+
+  </Accordion>
+
+  <Accordion title="ErrInvalidValueOfLength">
+
+**Message:** `invalid association values, length doesn't match`
+
+**Occurs when:** `Association.Append` or `Association.Replace` is called with a slice of values whose length does not match the number of parent records.
+
+  </Accordion>
+
+  <Accordion title="ErrPreloadNotAllowed">
+
+**Message:** `preload is not allowed when count is used`
+
+**Occurs when:** `Preload` is combined with `Count` in the same query chain. Preloading makes no sense for a count query.
+
+```go
+// This will fail
+db.Preload("Orders").Count(&count)
+
+// Correct — separate the count from the preload query
+db.Model(&User{}).Count(&count)
+```
+
+  </Accordion>
+
+  <Accordion title="ErrDuplicatedKey">
+
+**Message:** `duplicated key not allowed`
+
+**Occurs when:** A `Create` or `Save` violates a unique key constraint. Only returned when `Config.TranslateError` is `true` and the dialector implements `ErrorTranslator`.
+
+```go
+result := db.Create(&user)
+if errors.Is(result.Error, gorm.ErrDuplicatedKey) {
+    // handle duplicate (e.g., return HTTP 409)
+}
+```
+
+  </Accordion>
+
+  <Accordion title="ErrForeignKeyViolated">
+
+**Message:** `violates foreign key constraint`
+
+**Occurs when:** An insert or update violates a foreign key constraint. Only returned when `Config.TranslateError` is `true` and the dialector implements `ErrorTranslator`.
+
+```go
+result := db.Create(&order) // where order.UserID does not exist
+if errors.Is(result.Error, gorm.ErrForeignKeyViolated) {
+    // handle referential integrity error
+}
+```
+
+  </Accordion>
+
+  <Accordion title="ErrCheckConstraintViolated">
+
+**Message:** `violates check constraint`
+
+**Occurs when:** An insert or update violates a `CHECK` constraint defined on the table. Only returned when `Config.TranslateError` is `true` and the dialector implements `ErrorTranslator`.
+
+```go
+result := db.Create(&product) // where price < 0 violates CHECK (price >= 0)
+if errors.Is(result.Error, gorm.ErrCheckConstraintViolated) {
+    // handle constraint violation
+}
+```
+
+  </Accordion>
+
+</AccordionGroup>
+
+## Error handling patterns
+
+<CodeGroup>
+
+```go check-after-find.go
+// ErrRecordNotFound — safe "not found" check
+var user User
+if err := db.First(&user, id).Error; err != nil {
+    if errors.Is(err, gorm.ErrRecordNotFound) {
+        return nil, fmt.Errorf("user %d not found", id)
+    }
+    return nil, fmt.Errorf("database error: %w", err)
+}
+```
+
+```go translated-errors.go
+// Translated constraint errors — requires TranslateError: true in Config
+db, _ := gorm.Open(dialector, &gorm.Config{TranslateError: true})
+
+if err := db.Create(&record).Error; err != nil {
+    switch {
+    case errors.Is(err, gorm.ErrDuplicatedKey):
+        return ErrConflict
+    case errors.Is(err, gorm.ErrForeignKeyViolated):
+        return ErrBadReference
+    default:
+        return err
+    }
+}
+```
+
+```go global-update-guard.go
+// Guarding against accidental global updates
+if err := db.Delete(&User{}).Error; err != nil {
+    if errors.Is(err, gorm.ErrMissingWhereClause) {
+        // This is a programming error — add a condition
+    }
+}
+```
+
+</CodeGroup>
+
+<Tip>
+  Enable `Config.TranslateError: true` to convert raw driver errors into typed GORM sentinel errors. Without it, `ErrDuplicatedKey`, `ErrForeignKeyViolated`, and `ErrCheckConstraintViolated` are never returned — you receive the raw `*pq.Error` or equivalent.
+</Tip>

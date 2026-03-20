@@ -1,0 +1,180 @@
+---
+title: Has many
+description: Define a one-to-many relationship where one model can be associated with multiple instances of another model.
+---
+
+A `has many` association creates a one-to-many relationship. One owner record can be associated with any number of child records. The foreign key is stored on the child model's table.
+
+## Struct definition
+
+```go
+type User struct {
+  gorm.Model
+  CreditCards []CreditCard
+}
+
+type CreditCard struct {
+  gorm.Model
+  Number string
+  UserID uint  // foreign key — references users.id
+}
+```
+
+GORM detects `has many` when the association field is a slice. It looks for a field named `<OwnerType>ID` on the child struct as the foreign key.
+
+## Override the foreign key
+
+Use `foreignKey` to specify a different field on the child model:
+
+```go
+type User struct {
+  gorm.Model
+  CreditCards []CreditCard `gorm:"foreignKey:UserRefer"`
+}
+
+type CreditCard struct {
+  gorm.Model
+  Number    string
+  UserRefer uint
+}
+```
+
+## Override references
+
+Point the foreign key at a non-primary field on the owner with `references`:
+
+```go
+type User struct {
+  gorm.Model
+  MemberNumber string       `gorm:"unique"`
+  CreditCards  []CreditCard `gorm:"foreignKey:UserMemberNumber;references:MemberNumber"`
+}
+
+type CreditCard struct {
+  gorm.Model
+  Number           string
+  UserMemberNumber string
+}
+```
+
+## Create with a HasMany association
+
+Populate the slice field when creating the owner record:
+
+```go
+user := User{
+  CreditCards: []CreditCard{
+    {Number: "4111-1111-1111-1111"},
+    {Number: "5500-0000-0000-0004"},
+  },
+}
+db.Create(&user)
+// INSERT INTO users DEFAULT VALUES;
+// INSERT INTO credit_cards (number, user_id) VALUES ('4111-1111-1111-1111', 1), ('5500-0000-0000-0004', 1);
+```
+
+To skip saving associations when creating:
+
+```go
+db.Omit("CreditCards").Create(&user)
+// INSERT INTO users DEFAULT VALUES; (CreditCards are not inserted)
+```
+
+## Query with Preload
+
+Load all associated records alongside the owner:
+
+```go
+var users []User
+db.Preload("CreditCards").Find(&users)
+// SELECT * FROM users;
+// SELECT * FROM credit_cards WHERE user_id IN (1, 2, 3);
+```
+
+Load a single user with all their credit cards:
+
+```go
+var user User
+db.Preload("CreditCards").First(&user, 1)
+```
+
+### Conditional preload
+
+Filter the associated records during preload:
+
+```go
+// Only load non-expired cards
+db.Preload("CreditCards", "expires_at > ?", time.Now()).Find(&users)
+
+// Using a function for complex conditions
+db.Preload("CreditCards", func(db *gorm.DB) *gorm.DB {
+  return db.Order("credit_cards.number ASC")
+}).Find(&users)
+```
+
+### Preload All
+
+Use `clause.Associations` to preload all first-level associations at once:
+
+```go
+db.Preload(clause.Associations).Find(&users)
+```
+
+## Association mode operations
+
+Use Association mode to manage the child records of a loaded owner:
+
+```go
+// Append new credit cards to an existing user
+db.Model(&user).Association("CreditCards").Append(
+  &CreditCard{Number: "3782-8224-6310-005"},
+)
+
+// Replace all credit cards
+db.Model(&user).Association("CreditCards").Replace(
+  []CreditCard{{Number: "4111-1111-1111-1111"}},
+)
+
+// Delete a specific credit card from the association
+db.Model(&user).Association("CreditCards").Delete(&CreditCard{ID: 3})
+
+// Remove all credit cards from the association (sets user_id to NULL)
+db.Model(&user).Association("CreditCards").Clear()
+
+// Count associated credit cards
+count := db.Model(&user).Association("CreditCards").Count()
+```
+
+<Note>
+`Clear` and `Delete` nullify the foreign key by default. To permanently delete the child records, use `Unscoped().Association(...).Clear()` or call `Unscoped().Association(...).Delete(...)`. See [Association mode](/associations/association-mode) for details.
+</Note>
+
+## Batch operations
+
+Association mode supports batch operations when your model value is a slice:
+
+```go
+var users []User
+db.Find(&users)
+
+// Append a card to each user
+db.Model(&users).Association("CreditCards").Append(
+  []CreditCard{{Number: "4111"}, {Number: "5500"}},
+)
+// Each element in the slice maps to the corresponding user
+```
+
+<Warning>
+When performing batch operations, the length of the values slice must equal the length of the model slice, or GORM returns `ErrInvalidValueOfLength`.
+</Warning>
+
+## Constraints
+
+Define referential actions on the foreign key:
+
+```go
+type User struct {
+  gorm.Model
+  CreditCards []CreditCard `gorm:"constraint:OnUpdate:CASCADE,OnDelete:CASCADE;"`
+}
+```

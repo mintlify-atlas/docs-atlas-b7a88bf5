@@ -1,0 +1,189 @@
+---
+title: "Updating records"
+description: "Update single columns, multiple fields, or all fields using GORM's Update, Updates, Save, UpdateColumn, and UpdateColumns methods."
+---
+
+## Save — update all fields
+
+`Save` writes every field back to the database when the primary key is non-zero. Zero-value fields are included.
+
+```go
+var user User
+db.First(&user, 1)
+
+user.Name = "Jinzhu Updated"
+user.Age = 0 // zero value is written
+db.Save(&user)
+// UPDATE users SET name="Jinzhu Updated", age=0, updated_at=... WHERE id=1;
+```
+
+<Warning>
+`Save` performs a full-record UPDATE. Every field, including zero-value fields, is written. Use `Update` or `Updates` when you only want to change specific columns.
+</Warning>
+
+## Update — single column
+
+Use `Update` with `Model` to update one column. The `Model` call sets the model context and, if the struct has a non-zero primary key, scopes the UPDATE to that record.
+
+```go
+// Update a column on a specific record (primary key from the struct)
+db.Model(&user).Update("name", "Jinzhu")
+// UPDATE users SET name="Jinzhu", updated_at=... WHERE id=<user.ID>;
+
+// Update with a condition
+db.Model(&User{}).Where("active = ?", true).Update("name", "Jinzhu")
+// UPDATE users SET name="Jinzhu", updated_at=... WHERE active=true;
+
+// SQL expression
+db.Model(&user).Update("age", gorm.Expr("age * ? + ?", 2, 100))
+// UPDATE users SET age=age*2+100 WHERE id=<user.ID>;
+```
+
+## Updates — multiple columns
+
+`Updates` accepts a struct or a map.
+
+### Struct (non-zero fields only)
+
+When you pass a struct, GORM only updates fields with non-zero values.
+
+```go
+// Only Name and Age are updated; zero-value fields are skipped
+db.Model(&user).Updates(User{Name: "Jinzhu", Age: 18})
+// UPDATE users SET name="Jinzhu", age=18, updated_at=... WHERE id=<user.ID>;
+
+// Age is zero → only Name is updated
+db.Model(&user).Updates(User{Name: "Jinzhu", Age: 0})
+// UPDATE users SET name="Jinzhu", updated_at=... WHERE id=<user.ID>;
+```
+
+<Note>
+To update a field to its zero value using a struct, use `Select` to explicitly include it, or switch to a map.
+</Note>
+
+### Map (all keys updated)
+
+Every key in the map is written, including zero values.
+
+```go
+db.Model(&user).Updates(map[string]interface{}{
+  "name": "Jinzhu",
+  "age":  0,       // zero value is written
+  "active": false, // zero bool is written
+})
+// UPDATE users SET name="Jinzhu", age=0, active=false, updated_at=... WHERE id=<user.ID>;
+```
+
+## Selecting fields for update
+
+Use `Select` to control exactly which fields are written, regardless of whether you pass a struct or a map.
+
+```go
+// Update only Name, even though Address and Role are set in the map
+db.Model(&user).
+  Select("Name").
+  Updates(map[string]interface{}{"Name": "New Name", "Age": 100})
+// UPDATE users SET name="New Name" WHERE id=<user.ID>;
+
+// Force update ALL fields including zero values by selecting "*"
+db.Model(&user).
+  Select("*").
+  Updates(User{Name: "Jinzhu", Age: 0, Role: "admin"})
+// UPDATE users SET name="Jinzhu", age=0, role="admin", updated_at=... WHERE id=<user.ID>;
+
+// Select all except a specific field
+db.Model(&user).
+  Select("*").
+  Omit("Role").
+  Updates(User{Name: "Jinzhu", Age: 20, Role: "admin"})
+// UPDATE users SET name="Jinzhu", age=20, updated_at=... WHERE id=<user.ID>;
+```
+
+## Omitting fields on update
+
+Use `Omit` to exclude specific columns from the UPDATE.
+
+```go
+db.Model(&user).
+  Omit("Name").
+  Updates(map[string]interface{}{"Name": "Jinzhu", "Age": 20})
+// UPDATE users SET age=20, updated_at=... WHERE id=<user.ID>;
+```
+
+## SQL expressions in updates
+
+Use `gorm.Expr` to embed raw SQL expressions in an update value.
+
+```go
+// Increment a counter
+db.Model(&product).
+  Update("price", gorm.Expr("price * ? + ?", 1.1, 10))
+// UPDATE products SET price=price*1.1+10 WHERE id=<product.ID>;
+
+// Map with expressions
+db.Model(&product).Updates(map[string]interface{}{
+  "price":    gorm.Expr("price * ?", 1.1),
+  "quantity": gorm.Expr("quantity - ?", 1),
+})
+```
+
+## UpdateColumn and UpdateColumns — skip hooks
+
+`UpdateColumn` and `UpdateColumns` behave like `Update` and `Updates` respectively, but they skip all GORM callbacks (hooks) and do not auto-update the `UpdatedAt` timestamp.
+
+```go
+// Single column, no hooks, no UpdatedAt
+db.Model(&user).UpdateColumn("name", "Jinzhu")
+// UPDATE users SET name="Jinzhu" WHERE id=<user.ID>;
+
+// Multiple columns via struct
+db.Model(&user).UpdateColumns(User{Name: "Jinzhu", Age: 18})
+// UPDATE users SET name="Jinzhu", age=18 WHERE id=<user.ID>;
+
+// Multiple columns via map
+db.Model(&user).UpdateColumns(map[string]interface{}{
+  "name": "Jinzhu",
+  "age":  18,
+})
+```
+
+<Warning>
+Because `UpdateColumn`/`UpdateColumns` skip all hooks, the `BeforeUpdate`, `AfterUpdate`, and association update callbacks are not executed.
+</Warning>
+
+## Batch updates
+
+Omit the primary key from `Model` and add a `Where` condition to update multiple rows:
+
+```go
+// Update all users where active = false
+db.Model(&User{}).
+  Where("active = ?", false).
+  Updates(map[string]interface{}{"active": true, "role": "member"})
+// UPDATE users SET active=true, role="member", updated_at=... WHERE active=false;
+
+// Struct-based batch update (non-zero fields only)
+db.Model(User{}).
+  Where("role = ?", "guest").
+  Updates(User{Role: "member"})
+```
+
+Check `RowsAffected` to see how many rows were changed:
+
+```go
+result := db.Model(&User{}).Where("age < ?", 18).Updates(User{Role: "minor"})
+fmt.Println(result.RowsAffected) // number of updated rows
+```
+
+<Warning>
+GORM prevents batch updates without a `WHERE` condition and returns `gorm.ErrMissingWhereClause`. To intentionally update all rows, use `db.Where("1 = 1").Updates(...)` or the `AllowGlobalUpdate` session option.
+</Warning>
+
+## Error handling
+
+```go
+result := db.Model(&user).Update("name", "Jinzhu")
+if result.Error != nil {
+  // handle error
+}
+```

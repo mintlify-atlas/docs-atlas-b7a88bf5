@@ -1,80 +1,309 @@
 ---
 title: "Quickstart"
-description: "Start building awesome documentation in minutes"
+description: "Get up and running with GORM in 5 minutes. Install the library, define a model, connect to a database, and perform your first CRUD operations."
 ---
 
-## Get started in three steps
+This guide walks you through building a small Go program that creates, reads, updates, and deletes records using GORM and SQLite.
 
-Get your documentation site running locally and make your first customization.
+<Steps>
 
-### Step 1: Set up your local environment
+<Step title="Install GORM and a database driver">
 
-<AccordionGroup>
-  <Accordion icon="copy" title="Clone your docs locally">
-    During the onboarding process, you created a GitHub repository with your docs content if you didn't already have one. You can find a link to this repository in your [dashboard](https://dashboard.mintlify.com).
-    
-    To clone the repository locally so that you can make and preview changes to your docs, follow the [Cloning a repository](https://docs.github.com/en/repositories/creating-and-managing-repositories/cloning-a-repository) guide in the GitHub docs.
-  </Accordion>
-  <Accordion icon="rectangle-terminal" title="Start the preview server">
-    1. Install the Mintlify CLI: `npm i -g mint`
-    2. Navigate to your docs directory and run: `mint dev`
-    3. Open `http://localhost:3000` to see your docs live!
-    
-    <Tip>Your preview updates automatically as you edit files.</Tip>
-  </Accordion>
-</AccordionGroup>
+Install the GORM core library:
 
-### Step 2: Deploy your changes
+```bash
+go get -u gorm.io/gorm
+```
 
-<AccordionGroup>
-  <Accordion icon="github" title="Install our GitHub app">
-    Install the Mintlify GitHub app from your [dashboard](https://dashboard.mintlify.com/settings/organization/github-app).
-    
-    Our GitHub app automatically deploys your changes to your docs site, so you don't need to manage deployments yourself.
-</Accordion>
-<Accordion icon="palette" title="Update your site name and colors">
-    For a first change, let's update the name and colors of your docs site.
+Then install a driver for your database. This quickstart uses SQLite, which requires no server to run.
 
-    1. Open `docs.json` in your editor.
-    2. Change the `"name"` field to your project name.
-    3. Update the `"colors"` to match your brand.
-    4. Save and see your changes instantly at `http://localhost:3000`.
+<CodeGroup>
 
-    <Tip>Try changing the primary color to see an immediate difference!</Tip>
-  </Accordion>
-</AccordionGroup>
+```bash SQLite
+go get -u gorm.io/driver/sqlite
+```
 
-### Step 3: Go live
+```bash MySQL
+go get -u gorm.io/driver/mysql
+```
 
-<Accordion icon="rocket" title="Publish your docs">
-  1. Commit and push your changes.
-  2. Your docs will update and be live in moments!
-</Accordion>
+```bash PostgreSQL
+go get -u gorm.io/driver/postgres
+```
+
+```bash SQL Server
+go get -u gorm.io/driver/sqlserver
+```
+
+</CodeGroup>
+
+<Note>
+SQLite is ideal for local development and testing. For production workloads, use MySQL, PostgreSQL, or SQL Server. See [Connecting to a database](/connecting-to-database) for driver-specific DSN formats and configuration.
+</Note>
+
+</Step>
+
+<Step title="Define a model">
+
+A GORM model is a Go struct whose fields map to database columns. Embed `gorm.Model` to automatically get `ID`, `CreatedAt`, `UpdatedAt`, and `DeletedAt` fields.
+
+```go
+import "gorm.io/gorm"
+
+// gorm.Model provides:
+//   ID        uint           `gorm:"primarykey"`
+//   CreatedAt time.Time
+//   UpdatedAt time.Time
+//   DeletedAt gorm.DeletedAt `gorm:"index"`
+
+type Product struct {
+    gorm.Model
+    Code  string
+    Price uint
+}
+```
+
+GORM uses the struct name to derive the table name (`products` for `Product`) and uses conventional field names for primary keys and timestamps.
+
+<Tip>
+You can define a model without embedding `gorm.Model` if you want full control over the schema. Any field named `ID` with a numeric type is treated as the primary key by convention.
+</Tip>
+
+</Step>
+
+<Step title="Connect to a database">
+
+Use `gorm.Open` to initialize a database connection. Pass a dialector and an optional `*gorm.Config`.
+
+```go
+import (
+    "gorm.io/driver/sqlite"
+    "gorm.io/gorm"
+)
+
+db, err := gorm.Open(sqlite.Open("test.db"), &gorm.Config{})
+if err != nil {
+    panic("failed to connect database")
+}
+```
+
+`gorm.Open` returns a `*gorm.DB` instance and an error. The `*gorm.DB` is safe for concurrent use and should be shared across your application — do not create a new instance per request.
+
+<Warning>
+By default, GORM pings the database immediately after opening to verify the connection. If your database is unavailable at startup, `gorm.Open` returns an error. Set `DisableAutomaticPing: true` in `gorm.Config` to skip this check.
+</Warning>
+
+</Step>
+
+<Step title="Run AutoMigrate">
+
+`AutoMigrate` creates the table if it does not exist, and adds any missing columns or indexes. It never drops columns or modifies existing column types.
+
+```go
+// Create the "products" table (or add missing columns to it)
+err = db.AutoMigrate(&Product{})
+if err != nil {
+    panic("failed to migrate database")
+}
+```
+
+You can pass multiple models at once:
+
+```go
+db.AutoMigrate(&Product{}, &User{}, &Order{})
+```
+
+<Note>
+`AutoMigrate` is designed for development and CI environments. For production schema changes, prefer versioned migration tools such as [golang-migrate](https://github.com/golang-migrate/migrate) or [Atlas](https://atlasgo.io).
+</Note>
+
+</Step>
+
+<Step title="Create records">
+
+Pass a pointer to your model to `db.Create`. GORM sets the primary key and timestamps on the struct after the insert.
+
+```go
+product := Product{Code: "D42", Price: 100}
+
+result := db.Create(&product)
+if result.Error != nil {
+    panic(result.Error)
+}
+
+// product.ID is now set (e.g. 1)
+// product.CreatedAt and product.UpdatedAt are set to the current time
+fmt.Println("created product with ID:", product.ID)
+```
+
+To insert multiple records in one call, pass a slice:
+
+```go
+products := []Product{
+    {Code: "A10", Price: 50},
+    {Code: "B20", Price: 75},
+    {Code: "C30", Price: 120},
+}
+
+db.Create(&products)
+```
+
+</Step>
+
+<Step title="Read records">
+
+**Find the first record** ordered by primary key:
+
+```go
+var product Product
+
+// Find by primary key
+db.First(&product, 1)
+// SELECT * FROM products WHERE id = 1 ORDER BY id LIMIT 1;
+
+// Find by condition
+db.First(&product, "code = ?", "D42")
+// SELECT * FROM products WHERE code = 'D42' ORDER BY id LIMIT 1;
+```
+
+**Find all records** matching a condition:
+
+```go
+var products []Product
+
+// All products under $200
+db.Where("price < ?", 200).Find(&products)
+// SELECT * FROM products WHERE price < 200;
+
+// All products (no filter)
+db.Find(&products)
+// SELECT * FROM products;
+```
+
+<Note>
+`First` raises `gorm.ErrRecordNotFound` when no record matches. Use `errors.Is(result.Error, gorm.ErrRecordNotFound)` to check. `Find` does not return an error for empty results — it returns an empty slice.
+</Note>
+
+</Step>
+
+<Step title="Update records">
+
+**Update a single column** with `Update`:
+
+```go
+// Update the Price column on a specific record
+db.Model(&product).Update("Price", 200)
+// UPDATE products SET price=200, updated_at=<now> WHERE id=1;
+```
+
+**Update multiple columns** with `Updates`. Pass a struct (only non-zero fields are updated) or a `map[string]interface{}` (all keys are updated):
+
+```go
+// Struct: only non-zero fields are written
+db.Model(&product).Updates(Product{Price: 200, Code: "F42"})
+// UPDATE products SET price=200, code='F42', updated_at=<now> WHERE id=1;
+
+// Map: all keys are written regardless of zero value
+db.Model(&product).Updates(map[string]interface{}{
+    "Price": 0,
+    "Code":  "F42",
+})
+// UPDATE products SET price=0, code='F42', updated_at=<now> WHERE id=1;
+```
+
+</Step>
+
+<Step title="Delete records">
+
+`Delete` performs a **soft delete** when the model embeds `gorm.Model` (it sets `DeletedAt` instead of removing the row). Soft-deleted records are excluded from all future queries automatically.
+
+```go
+// Soft delete — sets deleted_at on the row
+db.Delete(&product, 1)
+// UPDATE products SET deleted_at=<now> WHERE id=1;
+```
+
+To permanently delete a record, use `Unscoped`:
+
+```go
+// Hard delete — removes the row from the table
+db.Unscoped().Delete(&product, 1)
+// DELETE FROM products WHERE id=1;
+```
+
+</Step>
+
+</Steps>
+
+## Complete working example
+
+The following program ties all the steps together and runs against a local SQLite file:
+
+```go
+package main
+
+import (
+    "errors"
+    "fmt"
+
+    "gorm.io/driver/sqlite"
+    "gorm.io/gorm"
+)
+
+type Product struct {
+    gorm.Model
+    Code  string
+    Price uint
+}
+
+func main() {
+    // 1. Open database connection
+    db, err := gorm.Open(sqlite.Open("test.db"), &gorm.Config{})
+    if err != nil {
+        panic("failed to connect database")
+    }
+
+    // 2. Migrate schema
+    db.AutoMigrate(&Product{})
+
+    // 3. Create
+    db.Create(&Product{Code: "D42", Price: 100})
+
+    // 4. Read
+    var product Product
+    db.First(&product, 1)                 // find by primary key
+    db.First(&product, "code = ?", "D42") // find by condition
+
+    // 5. Update
+    db.Model(&product).Update("Price", 200)
+    db.Model(&product).Updates(Product{Price: 200, Code: "F42"})
+    db.Model(&product).Updates(map[string]interface{}{"Price": 200, "Code": "F42"})
+
+    // 6. Delete (soft delete — sets deleted_at)
+    db.Delete(&product, 1)
+
+    // Check for record not found
+    var p Product
+    result := db.First(&p, 999)
+    if errors.Is(result.Error, gorm.ErrRecordNotFound) {
+        fmt.Println("record not found")
+    }
+}
+```
 
 ## Next steps
 
-Now that you have your docs running, explore these key features:
-
-<CardGroup cols={2}>
-
-<Card title="Write Content" icon="pen-to-square" href="/essentials/markdown">
-  Learn MDX syntax and start writing your documentation.
-</Card>
-
-<Card title="Customize style" icon="palette" href="/essentials/settings">
-  Make your docs match your brand perfectly.
-</Card>
-
-<Card title="Add code examples" icon="square-code" href="/essentials/code">
-  Include syntax-highlighted code blocks.
-</Card>
-
-<Card title="API documentation" icon="code" href="/api-reference/introduction">
-  Auto-generate API docs from OpenAPI specs.
-</Card>
-
-</CardGroup>
-
-<Note>
-  **Need help?** See our [full documentation](https://mintlify.com/docs) or join our [community](https://mintlify.com/community).
-</Note>
+<Columns cols={2}>
+  <Card title="Connecting to a database" icon="database" href="/connecting-to-database">
+    Configure MySQL, PostgreSQL, SQLite, and SQL Server with real DSN examples and connection pool settings.
+  </Card>
+  <Card title="Declaring models" icon="table" href="/models/declaring-models">
+    Define models with custom column names, data types, constraints, and embedded structs.
+  </Card>
+  <Card title="CRUD: Create" icon="plus" href="/crud/create">
+    Batch inserts, upserts, hooks, and creating with associations.
+  </Card>
+  <Card title="CRUD: Query" icon="magnifying-glass" href="/crud/query">
+    Where conditions, ordering, pagination, preloading associations, and raw SQL.
+  </Card>
+</Columns>

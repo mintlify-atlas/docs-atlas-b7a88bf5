@@ -1,0 +1,436 @@
+---
+title: "Configuration"
+description: "Configure GORM's behavior at initialization time using Config and Session structs."
+---
+
+GORM is configured by passing a `*gorm.Config` to `gorm.Open`. Every field has a safe default, so you only need to set the fields you want to change.
+
+```go
+import (
+    "gorm.io/gorm"
+    "gorm.io/driver/postgres"
+)
+
+db, err := gorm.Open(postgres.Open(dsn), &gorm.Config{
+    SkipDefaultTransaction: true,
+    PrepareStmt:            true,
+})
+```
+
+## Config fields
+
+### Transaction behavior
+
+<ParamField path="SkipDefaultTransaction" type="bool" default="false">
+  By default GORM wraps each `Create`, `Update`, and `Delete` call in a transaction to protect data integrity. Set this to `true` to skip that transaction and execute statements directly, which can improve throughput when you are managing transactions yourself.
+
+  ```go
+  db, err := gorm.Open(dialector, &gorm.Config{
+      SkipDefaultTransaction: true,
+  })
+  ```
+</ParamField>
+
+<ParamField path="DefaultTransactionTimeout" type="time.Duration" default="0 (no timeout)">
+  Sets a default timeout for transactions started by GORM. When non-zero, a context with this deadline is automatically applied to each transaction.
+
+  ```go
+  db, err := gorm.Open(dialector, &gorm.Config{
+      DefaultTransactionTimeout: 30 * time.Second,
+  })
+  ```
+</ParamField>
+
+<ParamField path="DefaultContextTimeout" type="time.Duration" default="0 (no timeout)">
+  Sets a default timeout for the context attached to each database operation. Useful as a global safety net for runaway queries.
+
+  ```go
+  db, err := gorm.Open(dialector, &gorm.Config{
+      DefaultContextTimeout: 10 * time.Second,
+  })
+  ```
+</ParamField>
+
+<ParamField path="DisableNestedTransaction" type="bool" default="false">
+  When `true`, GORM will not use `SAVEPOINT` inside an existing transaction. Instead, the nested `Transaction()` call reuses the outer transaction directly.
+
+  ```go
+  db, err := gorm.Open(dialector, &gorm.Config{
+      DisableNestedTransaction: true,
+  })
+  ```
+</ParamField>
+
+### Naming and schema
+
+<ParamField path="NamingStrategy" type="schema.Namer" default="schema.NamingStrategy{IdentifierMaxLength: 64}">
+  Controls how GORM maps struct names and field names to table and column names. Pass a custom implementation of `schema.Namer` to apply your own conventions.
+
+  ```go
+  import "gorm.io/gorm/schema"
+
+  db, err := gorm.Open(dialector, &gorm.Config{
+      NamingStrategy: schema.NamingStrategy{
+          TablePrefix:   "app_",   // all tables will be prefixed with app_
+          SingularTable: true,     // use singular table names
+      },
+  })
+  ```
+</ParamField>
+
+### Associations
+
+<ParamField path="FullSaveAssociations" type="bool" default="false">
+  When `true`, GORM upserts associated records during `Create` and `Save` operations. When `false` (default), only the foreign key on the owner record is updated.
+
+  ```go
+  db, err := gorm.Open(dialector, &gorm.Config{
+      FullSaveAssociations: true,
+  })
+  ```
+</ParamField>
+
+### Logging
+
+<ParamField path="Logger" type="logger.Interface" default="logger.Default (Warn level)">
+  The logger used by GORM to emit SQL traces, slow query warnings, and errors. Replace with any implementation of `logger.Interface`.
+
+  ```go
+  import "gorm.io/gorm/logger"
+
+  db, err := gorm.Open(dialector, &gorm.Config{
+      Logger: logger.Default.LogMode(logger.Info),
+  })
+  ```
+
+  See [Logger](/configuration/logger) for full details.
+</ParamField>
+
+### Time
+
+<ParamField path="NowFunc" type="func() time.Time" default="time.Now().Local()">
+  The function GORM calls to generate timestamps for `CreatedAt`, `UpdatedAt`, and soft-delete `DeletedAt` fields. Override it to use UTC, a mock time in tests, or a custom precision.
+
+  ```go
+  db, err := gorm.Open(dialector, &gorm.Config{
+      NowFunc: func() time.Time {
+          return time.Now().UTC()
+      },
+  })
+  ```
+</ParamField>
+
+### Debugging
+
+<ParamField path="DryRun" type="bool" default="false">
+  When `true`, GORM generates SQL statements but does not execute them. Useful for inspecting generated SQL or in tests.
+
+  ```go
+  db, err := gorm.Open(dialector, &gorm.Config{
+      DryRun: true,
+  })
+
+  // The statement is built but never sent to the database
+  stmt := db.Find(&users).Statement
+  fmt.Println(stmt.SQL.String())
+  ```
+</ParamField>
+
+### Prepared statements
+
+<ParamField path="PrepareStmt" type="bool" default="false">
+  Enables the prepared-statement cache globally. All queries are compiled once and reused from an in-process cache, reducing parse overhead on subsequent executions.
+
+  ```go
+  db, err := gorm.Open(dialector, &gorm.Config{
+      PrepareStmt: true,
+  })
+  ```
+</ParamField>
+
+<ParamField path="PrepareStmtMaxSize" type="int" default="math.MaxInt64 (unlimited)">
+  Sets the maximum number of prepared statements held in the LRU cache. Once the cache is full, the least recently used entry is evicted. The default allows an unlimited number of cached statements.
+
+  ```go
+  db, err := gorm.Open(dialector, &gorm.Config{
+      PrepareStmt:        true,
+      PrepareStmtMaxSize: 100,
+  })
+  ```
+</ParamField>
+
+<ParamField path="PrepareStmtTTL" type="time.Duration" default="1h">
+  How long a prepared statement remains in the cache before being evicted. After the TTL expires the statement is re-prepared on the next use.
+
+  ```go
+  db, err := gorm.Open(dialector, &gorm.Config{
+      PrepareStmt:    true,
+      PrepareStmtTTL: 30 * time.Minute,
+  })
+  ```
+</ParamField>
+
+See [Prepared statements](/configuration/prepared-statements) for full details.
+
+### Connection
+
+<ParamField path="DisableAutomaticPing" type="bool" default="false">
+  By default, GORM pings the database after `Open` to verify connectivity. Set this to `true` to skip that ping, for example when you are using a lazy connection pool.
+
+  ```go
+  db, err := gorm.Open(dialector, &gorm.Config{
+      DisableAutomaticPing: true,
+  })
+  ```
+</ParamField>
+
+<ParamField path="ConnPool" type="ConnPool" default="nil">
+  Lets you supply a custom connection pool (anything implementing `ConnPool`) instead of the dialector's default pool. Useful when sharing a `*sql.DB` instance across multiple GORM instances.
+
+  ```go
+  sqlDB, _ := sql.Open("postgres", dsn)
+
+  db, err := gorm.Open(dialector, &gorm.Config{
+      ConnPool: sqlDB,
+  })
+  ```
+</ParamField>
+
+### Migrations
+
+<ParamField path="DisableForeignKeyConstraintWhenMigrating" type="bool" default="false">
+  When `true`, GORM does not create foreign key constraints during `AutoMigrate` or `CreateTable`. Helpful for databases that have limited foreign key support, or when you prefer to manage constraints out-of-band.
+
+  ```go
+  db, err := gorm.Open(dialector, &gorm.Config{
+      DisableForeignKeyConstraintWhenMigrating: true,
+  })
+  ```
+</ParamField>
+
+<ParamField path="IgnoreRelationshipsWhenMigrating" type="bool" default="false">
+  When `true`, GORM ignores all relationship fields (foreign keys, join tables) during migration, so only the model's own columns are created or altered.
+
+  ```go
+  db, err := gorm.Open(dialector, &gorm.Config{
+      IgnoreRelationshipsWhenMigrating: true,
+  })
+  ```
+</ParamField>
+
+### Queries
+
+<ParamField path="AllowGlobalUpdate" type="bool" default="false">
+  GORM returns an error when you call `Update` or `Delete` without a `WHERE` clause (to prevent accidental mass writes). Set this to `true` to allow those operations.
+
+  <Warning>Enabling global updates lets you overwrite or delete every row in a table with a single call. Use with caution.</Warning>
+
+  ```go
+  db, err := gorm.Open(dialector, &gorm.Config{
+      AllowGlobalUpdate: true,
+  })
+  ```
+</ParamField>
+
+<ParamField path="QueryFields" type="bool" default="false">
+  When `true`, `SELECT` statements are generated with explicit column names (`SELECT id, name, ...`) rather than `SELECT *`. This avoids issues with added columns and can make query plans more predictable.
+
+  ```go
+  db, err := gorm.Open(dialector, &gorm.Config{
+      QueryFields: true,
+  })
+  ```
+</ParamField>
+
+<ParamField path="CreateBatchSize" type="int" default="0 (no batching)">
+  When non-zero, `Create` splits a slice of records into batches of this size. This reduces memory pressure and avoids exceeding per-query parameter limits for large inserts.
+
+  ```go
+  db, err := gorm.Open(dialector, &gorm.Config{
+      CreateBatchSize: 1000,
+  })
+
+  // Inserts 10,000 users in batches of 1,000
+  db.Create(&users)
+  ```
+</ParamField>
+
+### Errors
+
+<ParamField path="TranslateError" type="bool" default="false">
+  When `true`, GORM translates database-specific errors (such as unique constraint violations) into GORM's own error types like `gorm.ErrDuplicatedKey`. The dialector must implement `ErrorTranslator` for this to have any effect.
+
+  ```go
+  db, err := gorm.Open(dialector, &gorm.Config{
+      TranslateError: true,
+  })
+
+  result := db.Create(&user)
+  if errors.Is(result.Error, gorm.ErrDuplicatedKey) {
+      // handle duplicate
+  }
+  ```
+</ParamField>
+
+### Scoping
+
+<ParamField path="PropagateUnscoped" type="bool" default="false">
+  When `true`, an `Unscoped()` call on the parent session propagates to all nested associations, so soft-deleted records are included throughout the entire query tree.
+
+  ```go
+  db, err := gorm.Open(dialector, &gorm.Config{
+      PropagateUnscoped: true,
+  })
+  ```
+</ParamField>
+
+### Extensibility
+
+<ParamField path="ClauseBuilders" type="map[string]clause.ClauseBuilder" default="{}">
+  A map of clause names to custom builder functions. Use this to override how GORM renders specific SQL clauses for a dialector or a particular use case.
+
+  ```go
+  import "gorm.io/gorm/clause"
+
+  db, err := gorm.Open(dialector, &gorm.Config{
+      ClauseBuilders: map[string]clause.ClauseBuilder{
+          "LIMIT": myCustomLimitBuilder,
+      },
+  })
+  ```
+</ParamField>
+
+<ParamField path="Dialector" type="gorm.Dialector" default="nil">
+  The database driver implementation. Normally passed as the first argument to `gorm.Open`, but you can also embed it in `Config`.
+</ParamField>
+
+<ParamField path="Plugins" type="map[string]Plugin" default="{}">
+  Map of registered plugins, keyed by plugin name. Plugins are initialized after the database connection is established. Prefer `db.Use(plugin)` over setting this directly.
+
+  ```go
+  // Preferred way to register a plugin
+  db.Use(prometheus.New(prometheus.Config{}))
+  ```
+</ParamField>
+
+---
+
+## Session
+
+A `Session` lets you create a new `*gorm.DB` that shares the underlying connection pool but has overridden settings for a single chain of calls. The original `db` is not modified.
+
+```go
+tx := db.Session(&gorm.Session{
+    DryRun:      true,
+    QueryFields: true,
+})
+```
+
+### Session fields
+
+<ParamField path="DryRun" type="bool" default="false">
+  Generates SQL without executing it for this session.
+</ParamField>
+
+<ParamField path="PrepareStmt" type="bool" default="false">
+  Enables the prepared-statement cache for this session. Shares the same statement cache as the parent `db`.
+</ParamField>
+
+<ParamField path="NewDB" type="bool" default="false">
+  When `true`, the new session starts with a clean statement (no previously applied conditions or clauses carry over).
+
+  ```go
+  tx := db.Where("active = ?", true).Session(&gorm.Session{NewDB: true})
+  // The WHERE clause from the parent is discarded
+  ```
+</ParamField>
+
+<ParamField path="Initialized" type="bool" default="false">
+  When `true`, the returned `*DB` is immediately initialized rather than lazily on the next operation. Rarely needed outside of plugin development.
+</ParamField>
+
+<ParamField path="SkipHooks" type="bool" default="false">
+  When `true`, all `BeforeCreate`, `AfterCreate`, and other model hook methods are skipped for this session.
+
+  ```go
+  tx := db.Session(&gorm.Session{SkipHooks: true})
+  tx.Create(&user) // hooks are not called
+  ```
+</ParamField>
+
+<ParamField path="SkipDefaultTransaction" type="bool" default="false">
+  Skips the implicit transaction for single-statement writes in this session.
+</ParamField>
+
+<ParamField path="DisableNestedTransaction" type="bool" default="false">
+  Disables `SAVEPOINT` usage inside transactions for this session.
+</ParamField>
+
+<ParamField path="AllowGlobalUpdate" type="bool" default="false">
+  Permits `UPDATE`/`DELETE` without a `WHERE` clause in this session.
+</ParamField>
+
+<ParamField path="FullSaveAssociations" type="bool" default="false">
+  Upserts associations in this session.
+</ParamField>
+
+<ParamField path="PropagateUnscoped" type="bool" default="false">
+  Propagates `Unscoped()` to nested associations in this session.
+</ParamField>
+
+<ParamField path="QueryFields" type="bool" default="false">
+  Generates explicit column lists instead of `SELECT *` for this session.
+</ParamField>
+
+<ParamField path="Context" type="context.Context" default="nil">
+  Attaches a context to every operation in this session. The context controls cancellation, deadlines, and propagated values.
+
+  ```go
+  ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+  defer cancel()
+
+  tx := db.Session(&gorm.Session{Context: ctx})
+  tx.Find(&users)
+  ```
+</ParamField>
+
+<ParamField path="Logger" type="logger.Interface" default="nil (inherits from db)">
+  Overrides the logger for this session only.
+
+  ```go
+  tx := db.Session(&gorm.Session{
+      Logger: logger.Default.LogMode(logger.Info),
+  })
+  ```
+</ParamField>
+
+<ParamField path="NowFunc" type="func() time.Time" default="nil (inherits from db)">
+  Overrides the timestamp function for this session.
+</ParamField>
+
+<ParamField path="CreateBatchSize" type="int" default="0 (inherits from db)">
+  Overrides the batch size for `Create` in this session.
+</ParamField>
+
+### Shorthands
+
+`db.WithContext` is a convenience wrapper for the common pattern of attaching a context:
+
+```go
+// These two are equivalent
+tx := db.WithContext(ctx)
+tx := db.Session(&gorm.Session{Context: ctx})
+```
+
+`db.Debug` enables `Info`-level logging for the current statement chain:
+
+```go
+// Logs the SQL for this query at Info level
+db.Debug().Find(&users)
+
+// Equivalent to:
+tx := db.Session(&gorm.Session{
+    Logger: db.Logger.LogMode(logger.Info),
+})
+tx.Find(&users)
+```

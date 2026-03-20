@@ -1,0 +1,254 @@
+---
+title: 'Dialectors'
+description: 'Implement the Dialector interface to add support for new databases or customize SQL generation'
+---
+
+A dialector is the bridge between GORM and a specific database engine. It translates GORM's abstract operations into the SQL dialect, quoting rules, data types, and bind variable syntax of a concrete database. GORM ships official dialectors for MySQL, PostgreSQL, SQLite, SQL Server, and ClickHouse — but you can implement your own.
+
+## The Dialector interface
+
+```go
+type Dialector interface {
+    Name() string
+    Initialize(*DB) error
+    Migrator(db *DB) Migrator
+    DataTypeOf(*schema.Field) string
+    DefaultValueOf(*schema.Field) clause.Expression
+    BindVarTo(writer clause.Writer, stmt *Statement, v interface{})
+    QuoteTo(clause.Writer, string)
+    Explain(sql string, vars ...interface{}) string
+}
+```
+
+| Method | Responsibility |
+|---|---|
+| `Name() string` | Returns the dialector's identifier (e.g., `"mysql"`, `"postgres"`). |
+| `Initialize(*DB) error` | Called once by `gorm.Open`. Sets up the connection pool, registers callbacks, and configures clause builders. |
+| `Migrator(*DB) Migrator` | Returns the implementation of the `Migrator` interface used by `db.AutoMigrate` and `db.Migrator()`. |
+| `DataTypeOf(*schema.Field) string` | Maps a GORM schema field to the database-specific SQL type string (e.g., `"VARCHAR(255)"`, `"BIGINT"`). |
+| `DefaultValueOf(*schema.Field) clause.Expression` | Returns the SQL expression for a column's default value. |
+| `BindVarTo(writer, stmt, v)` | Writes the bind variable placeholder for a query parameter (e.g., `?` for MySQL, `$1` for PostgreSQL). |
+| `QuoteTo(writer, string)` | Writes a quoted identifier (e.g., `` `name` `` for MySQL, `"name"` for PostgreSQL). |
+| `Explain(sql, vars) string` | Interpolates bind variables into an SQL string for logging purposes only — never for execution. |
+
+## When to implement a custom dialector
+
+<AccordionGroup>
+  <Accordion title="Adding support for a new database">
+    If you want to use GORM with a database that doesn't have an official driver, implement the full `Dialector` interface along with a `Migrator`. You'll need to handle SQL generation, quoting, data type mapping, and connection pool initialization.
+  </Accordion>
+  <Accordion title="Wrapping an existing dialector">
+    If you need to intercept or modify SQL before it reaches the database — for example, to add query hints, enforce row limits, or log to an external system — embed an existing dialector and override only the methods you need.
+
+    ```go
+    type WrappedDialector struct {
+        gorm.Dialector
+    }
+
+    func (w *WrappedDialector) Name() string {
+        return "wrapped-" + w.Dialector.Name()
+    }
+
+    func (w *WrappedDialector) Explain(sql string, vars ...interface{}) string {
+        result := w.Dialector.Explain(sql, vars...)
+        log.Printf("[sql] %s", result)
+        return result
+    }
+    ```
+  </Accordion>
+</AccordionGroup>
+
+## The ConnPool interface
+
+GORM uses `ConnPool` as the abstraction over the underlying database connection. The dialector is responsible for providing a `ConnPool`-compatible value during `Initialize`.
+
+```go
+type ConnPool interface {
+    PrepareContext(ctx context.Context, query string) (*sql.Stmt, error)
+    ExecContext(ctx context.Context, query string, args ...interface{}) (sql.Result, error)
+    QueryContext(ctx context.Context, query string, args ...interface{}) (*sql.Rows, error)
+    QueryRowContext(ctx context.Context, query string, args ...interface{}) *sql.Row
+}
+```
+
+The standard `*sql.DB` and `*sql.Tx` types from the `database/sql` package both satisfy this interface, so most dialectors assign `db.ConnPool = sqlDB` inside `Initialize`.
+
+You can also provide a custom `ConnPool` to intercept all query execution — for example, to add request tracing or enforce timeouts:
+
+```go
+type TracingPool struct {
+    inner gorm.ConnPool
+    tracer trace.Tracer
+}
+
+func (p *TracingPool) ExecContext(ctx context.Context, query string, args ...interface{}) (sql.Result, error) {
+    ctx, span := p.tracer.Start(ctx, "db.exec")
+    defer span.End()
+    return p.inner.ExecContext(ctx, query, args...)
+}
+
+// ... implement the remaining ConnPool methods
+```
+
+## Additional dialector interfaces
+
+GORM checks for these optional interfaces at runtime and activates additional behavior when they are present.
+
+### SavePointerDialectorInterface
+
+Implement this interface to enable savepoint support inside nested transactions:
+
+```go
+type SavePointerDialectorInterface interface {
+    SavePoint(tx *DB, name string) error
+    RollbackTo(tx *DB, name string) error
+}
+```
+
+When GORM detects nested calls to `db.Transaction()` it will call `SavePoint` to create a savepoint and `RollbackTo` to roll back to it on error, rather than issuing a full `ROLLBACK`.
+
+```go
+func (d *MyDialector) SavePoint(tx *gorm.DB, name string) error {
+    return tx.Exec("SAVEPOINT " + name).Error
+}
+
+func (d *MyDialector) RollbackTo(tx *gorm.DB, name string) error {
+    return tx.Exec("ROLLBACK TO SAVEPOINT " + name).Error
+}
+```
+
+### ErrorTranslator
+
+Implement this interface to map database-specific errors to GORM's standard sentinel errors (such as `gorm.ErrDuplicatedKey` or `gorm.ErrForeignKeyViolated`):
+
+```go
+type ErrorTranslator interface {
+    Translate(err error) error
+}
+```
+
+GORM calls `Translate` on every error before returning it to the caller when `TranslateError: true` is set in `gorm.Config`:
+
+```go
+func (d *MyDialector) Translate(err error) error {
+    if isUniqueViolation(err) {
+        return gorm.ErrDuplicatedKey
+    }
+    if isForeignKeyViolation(err) {
+        return gorm.ErrForeignKeyViolated
+    }
+    return err
+}
+```
+
+<Note>
+If `TranslateError: true` is set in `gorm.Config` but the dialector does not implement `ErrorTranslator`, GORM will log a warning and return raw database errors.
+</Note>
+
+## Implementing a minimal dialector
+
+The following skeleton shows the minimum required to satisfy the `Dialector` interface. Fill in each method with the SQL syntax of your target database:
+
+```go
+package mydriver
+
+import (
+    "database/sql"
+    "fmt"
+
+    "gorm.io/gorm"
+    "gorm.io/gorm/clause"
+    "gorm.io/gorm/migrator"
+    "gorm.io/gorm/schema"
+)
+
+type Config struct {
+    DSN string
+}
+
+type Dialector struct {
+    *Config
+}
+
+func Open(dsn string) gorm.Dialector {
+    return &Dialector{Config: &Config{DSN: dsn}}
+}
+
+func (d Dialector) Name() string {
+    return "mydb"
+}
+
+func (d Dialector) Initialize(db *gorm.DB) error {
+    sqlDB, err := sql.Open("mydb-driver", d.DSN)
+    if err != nil {
+        return err
+    }
+    db.ConnPool = sqlDB
+
+    // Register any dialect-specific callbacks here
+    // db.Callback().Create().Replace("gorm:create", myCreateCallback)
+
+    return nil
+}
+
+func (d Dialector) Migrator(db *gorm.DB) gorm.Migrator {
+    return migrator.Migrator{Config: &migrator.Config{
+        DB:        db,
+        Dialector: d,
+    }}
+}
+
+func (d Dialector) DataTypeOf(field *schema.Field) string {
+    switch field.DataType {
+    case schema.Bool:
+        return "BOOLEAN"
+    case schema.Int, schema.Uint:
+        return "INTEGER"
+    case schema.Float:
+        return "REAL"
+    case schema.String:
+        return fmt.Sprintf("VARCHAR(%d)", field.Size)
+    case schema.Bytes:
+        return "BLOB"
+    case schema.Time:
+        return "TIMESTAMP"
+    }
+    return string(field.DataType)
+}
+
+func (d Dialector) DefaultValueOf(field *schema.Field) clause.Expression {
+    return clause.Expr{SQL: "DEFAULT"}
+}
+
+func (d Dialector) BindVarTo(writer clause.Writer, stmt *gorm.Statement, v interface{}) {
+    writer.WriteByte('?')
+}
+
+func (d Dialector) QuoteTo(writer clause.Writer, str string) {
+    writer.WriteByte('"')
+    writer.WriteString(str)
+    writer.WriteByte('"')
+}
+
+func (d Dialector) Explain(sql string, vars ...interface{}) string {
+    return fmt.Sprintf(sql, vars...) // simplified — use a proper interpolator
+}
+```
+
+Open the database using your dialector the same way you would with an official driver:
+
+```go
+db, err := gorm.Open(mydriver.Open("user:pass@host/dbname"), &gorm.Config{})
+```
+
+## Related interfaces
+
+The following interfaces from `gorm.io/gorm` may also be relevant when building a dialector:
+
+| Interface | Purpose |
+|---|---|
+| `TxBeginner` | Implemented by `*sql.DB`. Allows GORM to start transactions with `BeginTx`. |
+| `ConnPoolBeginner` | Alternative to `TxBeginner` for connection pools that return a `ConnPool` rather than a `*sql.Tx`. |
+| `TxCommitter` | Implemented by `*sql.Tx`. Used by GORM to commit or roll back transactions. |
+| `GetDBConnector` | Implement on your `ConnPool` to let `db.DB()` return the underlying `*sql.DB`. |
+| `Valuer` | Implement on model field types to provide a custom `clause.Expr` for SQL generation. |

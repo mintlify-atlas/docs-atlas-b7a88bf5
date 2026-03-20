@@ -1,0 +1,118 @@
+---
+title: Scopes
+description: Encapsulate reusable query conditions as scope functions and compose them at query time.
+---
+
+Scopes let you define named query conditions as plain Go functions and apply them dynamically to any query. This keeps query logic reusable, testable, and easy to compose.
+
+## Defining a scope
+
+A scope is any function with the signature `func(*gorm.DB) *gorm.DB`. Add conditions to the incoming `db` and return it.
+
+```go
+func ActiveUsers(db *gorm.DB) *gorm.DB {
+    return db.Where("active = ?", true)
+}
+
+func AmountGreaterThan1000(db *gorm.DB) *gorm.DB {
+    return db.Where("amount > ?", 1000)
+}
+```
+
+## Applying scopes
+
+Pass one or more scope functions to `db.Scopes`. They are applied in order before the query executes.
+
+```go
+var users []User
+db.Scopes(ActiveUsers).Find(&users)
+// SELECT * FROM users WHERE active = true
+
+var orders []Order
+db.Scopes(AmountGreaterThan1000, ActiveUsers).Find(&orders)
+// SELECT * FROM orders WHERE amount > 1000 AND active = true
+```
+
+## Parameterized scopes
+
+When a scope needs runtime parameters, write a function that accepts the parameters and returns a scope function.
+
+```go
+func OrderStatus(status []string) func(*gorm.DB) *gorm.DB {
+    return func(db *gorm.DB) *gorm.DB {
+        return db.Where("status IN (?)", status)
+    }
+}
+
+func PriceBetween(low, high float64) func(*gorm.DB) *gorm.DB {
+    return func(db *gorm.DB) *gorm.DB {
+        return db.Where("price BETWEEN ? AND ?", low, high)
+    }
+}
+```
+
+## Composing scopes
+
+Combine simple and parameterized scopes freely on a single query.
+
+```go
+var orders []Order
+
+db.Scopes(
+    AmountGreaterThan1000,
+    OrderStatus([]string{"paid", "shipped"}),
+    PriceBetween(10.0, 500.0),
+).Find(&orders)
+// SELECT * FROM orders
+//   WHERE amount > 1000
+//     AND status IN ('paid', 'shipped')
+//     AND price BETWEEN 10 AND 500
+```
+
+## Using scopes with different query types
+
+Scopes work with any GORM finisher — not just `Find`.
+
+```go
+// Count
+var count int64
+db.Model(&Order{}).Scopes(AmountGreaterThan1000).Count(&count)
+
+// Update
+db.Model(&Order{}).Scopes(OrderStatus([]string{"pending"})).Update("status", "cancelled")
+
+// Delete
+db.Scopes(AmountGreaterThan1000).Delete(&Order{})
+
+// First
+var order Order
+db.Scopes(AmountGreaterThan1000).First(&order)
+```
+
+## Pagination example
+
+Parameterized scopes are a natural fit for pagination.
+
+```go
+func Paginate(page, pageSize int) func(*gorm.DB) *gorm.DB {
+    return func(db *gorm.DB) *gorm.DB {
+        if page <= 0 {
+            page = 1
+        }
+        if pageSize <= 0 || pageSize > 100 {
+            pageSize = 10
+        }
+        offset := (page - 1) * pageSize
+        return db.Offset(offset).Limit(pageSize)
+    }
+}
+
+// Usage
+var users []User
+db.Scopes(Paginate(2, 20)).Find(&users)
+// SELECT * FROM users LIMIT 20 OFFSET 20
+```
+
+<Tip>
+Scopes are evaluated lazily — they run just before the query executes, which means you can build up a chain of scopes and pass the `*gorm.DB` around before calling a finisher.
+</Tip>

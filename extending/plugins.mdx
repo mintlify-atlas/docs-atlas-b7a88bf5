@@ -1,0 +1,188 @@
+---
+title: 'Plugins'
+description: 'Extend GORM with custom plugins that hook into the database lifecycle'
+---
+
+GORM's plugin system lets you package reusable extensions — callbacks, config modifications, or third-party integrations — behind a single interface. Plugins register themselves once during initialization and are stored on the `*DB` instance for the lifetime of the connection.
+
+## The Plugin interface
+
+Every plugin must satisfy the `Plugin` interface defined in `gorm.io/gorm`:
+
+```go
+type Plugin interface {
+    Name() string
+    Initialize(*DB) error
+}
+```
+
+| Method | Description |
+|---|---|
+| `Name() string` | Returns a unique identifier for the plugin. Used as the key in `db.Plugins`. |
+| `Initialize(*DB) error` | Called once when the plugin is registered. Receives the fully initialized `*DB` instance. Return a non-nil error to abort registration. |
+
+## Registering a plugin
+
+Call `db.Use(plugin)` to register a plugin:
+
+```go
+if err := db.Use(&MyPlugin{}); err != nil {
+    log.Fatalf("failed to register plugin: %v", err)
+}
+```
+
+GORM calls `plugin.Initialize(db)` and then stores the plugin in `db.Plugins` under the name returned by `plugin.Name()`. If a plugin with the same name is already registered, `db.Use` returns `gorm.ErrRegistered` and does not call `Initialize` again.
+
+<Warning>
+Registering the same plugin twice returns `gorm.ErrRegistered`. Each plugin name must be unique across the `*DB` instance.
+</Warning>
+
+## Accessing registered plugins
+
+Plugins are stored in `db.Plugins`, which is a `map[string]Plugin`:
+
+```go
+if plugin, ok := db.Plugins["my-plugin"]; ok {
+    p := plugin.(*MyPlugin)
+    // use p
+}
+```
+
+## Writing a custom plugin
+
+A plugin's `Initialize` method receives the `*DB` instance and can:
+
+- Register or replace callbacks
+- Modify configuration fields on `db.Config`
+- Store state for later retrieval via `db.Plugins`
+
+Here is a complete example of a plugin that logs a message before every `CREATE` statement:
+
+```go
+package myplugin
+
+import (
+    "fmt"
+    "gorm.io/gorm"
+)
+
+// MyPlugin logs before every create operation.
+type MyPlugin struct {
+    Prefix string
+}
+
+func (p *MyPlugin) Name() string {
+    return "my-plugin"
+}
+
+func (p *MyPlugin) Initialize(db *gorm.DB) error {
+    return db.Callback().Create().
+        Before("gorm:create").
+        Register("my-plugin:before_create", p.beforeCreate)
+}
+
+func (p *MyPlugin) beforeCreate(db *gorm.DB) {
+    fmt.Printf("%s: about to create %s\n", p.Prefix, db.Statement.Table)
+}
+```
+
+Register the plugin when opening your database:
+
+```go
+db, err := gorm.Open(sqlite.Open("app.db"), &gorm.Config{})
+if err != nil {
+    panic(err)
+}
+
+if err := db.Use(&MyPlugin{Prefix: "[audit]"}); err != nil {
+    panic(err)
+}
+```
+
+<Tip>
+Follow the `"plugin-name:callback-name"` naming convention for callbacks registered inside a plugin (e.g., `"my-plugin:before_create"`). This avoids collisions with GORM's built-in callbacks, which use the `"gorm:"` prefix.
+</Tip>
+
+## Passing state from a plugin
+
+If your plugin needs to share data with its callbacks at runtime, store it on the plugin struct and capture it via a closure or method value:
+
+```go
+type AuditPlugin struct {
+    Logger *log.Logger
+}
+
+func (p *AuditPlugin) Name() string { return "audit" }
+
+func (p *AuditPlugin) Initialize(db *gorm.DB) error {
+    db.Callback().Delete().
+        Before("gorm:delete").
+        Register("audit:before_delete", func(tx *gorm.DB) {
+            p.Logger.Printf("deleting from %s", tx.Statement.Table)
+        })
+    return nil
+}
+```
+
+## Reporting errors from Initialize
+
+Return a non-nil error from `Initialize` to prevent the plugin from being registered and to surface the error to the caller:
+
+```go
+func (p *MyPlugin) Initialize(db *gorm.DB) error {
+    if p.APIKey == "" {
+        return fmt.Errorf("my-plugin: APIKey is required")
+    }
+    // register callbacks ...
+    return nil
+}
+```
+
+## Built-in plugins
+
+GORM ships two official plugins in the `gorm.io/plugin` module:
+
+<AccordionGroup>
+  <Accordion title="Database Resolver">
+    The Database Resolver plugin (`gorm.io/plugin/dbresolver`) adds support for multiple database connections with automatic read/write splitting.
+
+    - Route writes to a primary database and reads to one or more replicas
+    - Define multiple sources and replicas per model or table name
+    - Supports connection pool configuration per resolver
+
+    ```go
+    import "gorm.io/plugin/dbresolver"
+
+    db.Use(dbresolver.Register(dbresolver.Config{
+        Sources:  []gorm.Dialector{mysql.Open(primaryDSN)},
+        Replicas: []gorm.Dialector{mysql.Open(replicaDSN)},
+        Policy:   dbresolver.RandomPolicy{},
+    }))
+    ```
+  </Accordion>
+  <Accordion title="Prometheus">
+    The Prometheus plugin (`gorm.io/plugin/prometheus`) exposes database metrics — connection pool stats, query counts, and latency histograms — in Prometheus format.
+
+    ```go
+    import "gorm.io/plugin/prometheus"
+
+    db.Use(prometheus.New(prometheus.Config{
+        DBName:          "app",
+        RefreshInterval: 15,
+        MetricsCollector: []prometheus.MetricsCollector{
+            &prometheus.MySQL{VariableNames: []string{"Threads_running"}},
+        },
+    }))
+    ```
+  </Accordion>
+</AccordionGroup>
+
+## Plugin naming convention
+
+Choose plugin names that are:
+
+- **Lowercase and hyphenated**: `"db-resolver"`, `"my-plugin"`
+- **Namespaced to your package or organization**: `"myorg-audit-log"`
+- **Stable**: the name is used as the map key in `db.Plugins`, so renaming a plugin is a breaking change for any code that looks it up by name
+
+GORM's own callbacks use the `"gorm:"` prefix (e.g., `"gorm:create"`). Avoid this prefix in third-party plugins.

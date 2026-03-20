@@ -1,0 +1,284 @@
+---
+title: Declaring models
+description: Define Go structs as GORM models using struct tags, embedded types, and field-level configuration.
+---
+
+GORM maps Go structs to database tables. Each exported field in a struct becomes a column, and the struct itself maps to a table. GORM reads struct tags in the `gorm:"..."` namespace to control column names, types, constraints, and behavior.
+
+## Basic model definition
+
+A GORM model is any Go struct. GORM will infer the table name and column names from the struct and field names.
+
+```go
+type User struct {
+    ID        uint
+    Name      string
+    Email     string
+    Age       int
+    CreatedAt time.Time
+    UpdatedAt time.Time
+}
+```
+
+GORM maps this struct to a `users` table with columns `id`, `name`, `email`, `age`, `created_at`, and `updated_at`.
+
+## The gorm.Model embedded struct
+
+`gorm.Model` is a convenience struct you can embed in your models to get four standard fields automatically.
+
+```go
+// From gorm.io/gorm model.go
+type Model struct {
+    ID        uint `gorm:"primarykey"`
+    CreatedAt time.Time
+    UpdatedAt time.Time
+    DeletedAt DeletedAt `gorm:"index"`
+}
+```
+
+Embed it in your own struct:
+
+```go
+type User struct {
+    gorm.Model
+    Name  string
+    Email string
+}
+```
+
+This gives the `users` table the columns `id`, `created_at`, `updated_at`, and `deleted_at` in addition to `name` and `email`.
+
+<Note>
+`DeletedAt` is a `gorm.DeletedAt` type (backed by `sql.NullTime`). When a record is deleted, GORM sets this field to the current time rather than removing the row. Queries automatically filter out soft-deleted rows.
+</Note>
+
+## Struct tags
+
+Use the `gorm:"..."` struct tag to configure field behavior. Multiple options are separated by semicolons.
+
+```go
+type Product struct {
+    ID          uint   `gorm:"primarykey"`
+    Code        string `gorm:"column:product_code;not null;uniqueIndex"`
+    Price       float64
+    Description string `gorm:"size:1000"`
+    Stock       int    `gorm:"default:0"`
+}
+```
+
+## Primary keys
+
+By default, GORM treats a field named `ID` as the primary key. If the field is an integer or unsigned integer type, GORM also enables auto-increment.
+
+```go
+type User struct {
+    ID   uint   // primary key, auto-increment
+    Name string
+}
+```
+
+To use a different field as the primary key, add the `primaryKey` tag:
+
+```go
+type User struct {
+    UserID uint   `gorm:"primaryKey"`
+    Name   string
+}
+```
+
+To use a non-integer primary key (which disables auto-increment), use a `string` or `uuid` type:
+
+```go
+type User struct {
+    ID   string `gorm:"primaryKey"` // no auto-increment
+    Name string
+}
+```
+
+<Tip>
+Composite primary keys are supported by tagging multiple fields with `primaryKey`.
+</Tip>
+
+## Column naming
+
+GORM converts CamelCase field names to snake_case column names by default. The `NamingStrategy` in `schema/naming.go` handles common initialisms (such as `ID`, `URL`, `HTTP`) so they don't produce awkward column names.
+
+| Field name    | Column name    |
+|---------------|----------------|
+| `Name`        | `name`         |
+| `FirstName`   | `first_name`   |
+| `UserID`      | `user_id`      |
+| `APIKey`      | `api_key`      |
+| `HTTPSPort`   | `https_port`   |
+
+Override the column name with the `column` tag:
+
+```go
+type User struct {
+    Name string `gorm:"column:full_name"`
+}
+```
+
+## Table naming
+
+GORM pluralizes the struct name in snake_case to derive the table name: `User` → `users`, `OrderItem` → `order_items`.
+
+Override the table name by implementing the `Tabler` interface:
+
+```go
+type User struct {
+    ID   uint
+    Name string
+}
+
+func (User) TableName() string {
+    return "profiles"
+}
+```
+
+<Note>
+`TableName()` must have a value receiver, not a pointer receiver, when used with `gorm.DB.AutoMigrate` or schema parsing.
+</Note>
+
+## Field-level tags reference
+
+<AccordionGroup>
+  <Accordion title="column">
+    Sets the database column name.
+
+    ```go
+    Name string `gorm:"column:full_name"`
+    ```
+  </Accordion>
+
+  <Accordion title="type">
+    Sets the SQL column type. Accepts database-specific types.
+
+    ```go
+    Bio string `gorm:"type:text"`
+    ```
+  </Accordion>
+
+  <Accordion title="size">
+    Sets the column size/length, primarily for strings.
+
+    ```go
+    Username string `gorm:"size:50"`
+    ```
+  </Accordion>
+
+  <Accordion title="not null">
+    Adds a `NOT NULL` constraint to the column.
+
+    ```go
+    Email string `gorm:"not null"`
+    ```
+  </Accordion>
+
+  <Accordion title="default">
+    Sets a default value for the column. Can be a literal value or a database function.
+
+    ```go
+    Status  string `gorm:"default:active"`
+    Counter int    `gorm:"default:0"`
+    ```
+  </Accordion>
+
+  <Accordion title="uniqueIndex">
+    Creates a unique index on the column.
+
+    ```go
+    Email string `gorm:"uniqueIndex"`
+    ```
+  </Accordion>
+
+  <Accordion title="index">
+    Creates a non-unique index on the column.
+
+    ```go
+    LastName string `gorm:"index"`
+    ```
+  </Accordion>
+
+  <Accordion title="primaryKey">
+    Marks the field as the primary key.
+
+    ```go
+    ID uint `gorm:"primaryKey"`
+    ```
+  </Accordion>
+
+  <Accordion title="autoIncrement">
+    Enables auto-increment for integer primary keys. Set to `false` to disable.
+
+    ```go
+    ID uint `gorm:"primaryKey;autoIncrement"`
+    ```
+  </Accordion>
+
+  <Accordion title="autoCreateTime">
+    Marks the field as the creation timestamp. Accepts `nano` or `milli` to store Unix nanoseconds or milliseconds instead of a `time.Time`.
+
+    ```go
+    CreatedAt int64 `gorm:"autoCreateTime"`       // Unix seconds
+    CreatedAt int64 `gorm:"autoCreateTime:milli"` // Unix milliseconds
+    CreatedAt int64 `gorm:"autoCreateTime:nano"`  // Unix nanoseconds
+    ```
+  </Accordion>
+
+  <Accordion title="autoUpdateTime">
+    Marks the field as the update timestamp. Same precision options as `autoCreateTime`.
+
+    ```go
+    UpdatedAt int64 `gorm:"autoUpdateTime"`       // Unix seconds
+    UpdatedAt int64 `gorm:"autoUpdateTime:milli"` // Unix milliseconds
+    UpdatedAt int64 `gorm:"autoUpdateTime:nano"`  // Unix nanoseconds
+    ```
+  </Accordion>
+
+  <Accordion title="-">
+    Excludes the field from all database operations.
+
+    ```go
+    Ignored string `gorm:"-"`            // skip create, read, update
+    Temp    string `gorm:"-:all"`        // skip everything including migration
+    NoWrite string `gorm:"-:migration"` // skip migration only
+    ```
+  </Accordion>
+
+  <Accordion title="<- and ->">
+    Control field read/write permissions.
+
+    ```go
+    ReadOnly  string `gorm:"->"` // read-only
+    WriteOnly string `gorm:"<-"` // create and update
+    CreateOnly string `gorm:"<-:create"` // only on insert
+    ```
+  </Accordion>
+</AccordionGroup>
+
+## Putting it all together
+
+```go
+package main
+
+import (
+    "time"
+    "gorm.io/gorm"
+)
+
+type Product struct {
+    gorm.Model
+    Code        string  `gorm:"column:product_code;size:50;uniqueIndex;not null"`
+    Name        string  `gorm:"size:200;not null"`
+    Description string  `gorm:"type:text"`
+    Price       float64 `gorm:"not null"`
+    Stock       int     `gorm:"default:0"`
+    SKU         string  `gorm:"column:sku;size:100;index"`
+    Internal    string  `gorm:"-"` // not persisted
+}
+
+func (Product) TableName() string {
+    return "products"
+}
+```

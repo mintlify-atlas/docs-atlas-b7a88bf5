@@ -1,0 +1,171 @@
+---
+title: Belongs to
+description: Define a many-to-one relationship where each instance of the declaring model references exactly one instance of another model.
+---
+
+A `belongs to` association sets up a many-to-one relationship. Each instance of the declaring model "belongs to" one instance of another model. The foreign key lives on the declaring model's table.
+
+## Struct definition
+
+Declare a `belongs to` association by embedding the associated struct and adding a foreign key field:
+
+```go
+type User struct {
+  gorm.Model
+  Name string
+}
+
+type Profile struct {
+  gorm.Model
+  UserID int    // foreign key — references users.id
+  User   User   // association
+  Name   string
+}
+```
+
+When GORM sees `User User` alongside `UserID int`, it automatically infers the `belongs to` relationship. The convention is `<TypeName>ID`.
+
+## Override the foreign key
+
+Use the `foreignKey` tag to point to a different field on the declaring model:
+
+```go
+type User struct {
+  gorm.Model
+  Name string
+}
+
+type Profile struct {
+  gorm.Model
+  UserRefer int
+  User      User `gorm:"foreignKey:UserRefer"`
+  Name      string
+}
+```
+
+## Override references
+
+By default GORM uses the associated model's primary key as the reference. Use `references` to point to a different field:
+
+```go
+type User struct {
+  gorm.Model
+  Name   string
+  Refer  string `gorm:"uniqueIndex"`
+}
+
+type Profile struct {
+  gorm.Model
+  Name      string
+  UserRefer string
+  User      User `gorm:"foreignKey:UserRefer;references:Refer"`
+}
+```
+
+<Note>
+The referenced field must have a unique constraint so the database can enforce referential integrity.
+</Note>
+
+## Create with a BelongsTo association
+
+When you create a record, GORM saves associated structs automatically if they have a zero-value primary key:
+
+```go
+profile := Profile{
+  Name: "jinzhu's profile",
+  User: User{Name: "jinzhu"},
+}
+db.Create(&profile)
+// INSERT INTO users (name) VALUES ('jinzhu');
+// INSERT INTO profiles (name, user_id) VALUES ('jinzhu\'s profile', 1);
+```
+
+To associate with an existing user, set the foreign key directly:
+
+```go
+profile := Profile{
+  Name:   "jinzhu's profile",
+  UserID: 1, // reference an existing user
+}
+db.Create(&profile)
+```
+
+## Query with Preload
+
+Use `Preload` to eagerly load a BelongsTo association in a single query pair:
+
+```go
+var profiles []Profile
+db.Preload("User").Find(&profiles)
+// SELECT * FROM profiles;
+// SELECT * FROM users WHERE id IN (1, 2, 3);
+```
+
+Load a single profile with its user:
+
+```go
+var profile Profile
+db.Preload("User").First(&profile, 1)
+```
+
+### Conditional preload
+
+Pass additional conditions to `Preload` to filter the associated records:
+
+```go
+var profiles []Profile
+db.Preload("User", "name = ?", "jinzhu").Find(&profiles)
+// Only loads users where name = 'jinzhu'
+```
+
+Use a function for more complex conditions:
+
+```go
+db.Preload("User", func(db *gorm.DB) *gorm.DB {
+  return db.Where("name LIKE ?", "%jin%")
+}).Find(&profiles)
+```
+
+## Query with Joins
+
+Use `Joins` to load the association with a SQL join instead of a separate query:
+
+```go
+var profiles []Profile
+db.Joins("User").Find(&profiles)
+// SELECT profiles.*, users.id AS "User__id", users.name AS "User__name"
+// FROM profiles LEFT JOIN users ON users.id = profiles.user_id;
+```
+
+<Tip>
+`Joins` issues a single SQL statement. `Preload` issues two queries but works better when loading many rows because it avoids a Cartesian product.
+</Tip>
+
+## Update a BelongsTo association
+
+Update the foreign key field directly and save:
+
+```go
+db.Model(&profile).Update("UserID", 2)
+```
+
+Or use Association mode to replace the associated record:
+
+```go
+newUser := User{Name: "new owner"}
+db.Model(&profile).Association("User").Replace(&newUser)
+```
+
+## Constraints
+
+GORM creates a database-level foreign key constraint when auto-migrating:
+
+```go
+type Profile struct {
+  gorm.Model
+  UserID int
+  User   User `gorm:"constraint:OnUpdate:CASCADE,OnDelete:SET NULL;"`
+}
+```
+
+Set `OnDelete` or `OnUpdate` to any SQL referential action: `CASCADE`, `SET NULL`, `RESTRICT`, `NO ACTION`.

@@ -1,0 +1,156 @@
+---
+title: 'Session'
+description: 'Create scoped DB sessions with per-operation overrides for dry run, prepared statements, hooks, context, and more.'
+---
+
+A `Session` is a lightweight configuration overlay applied on top of an existing `*DB`. Call `db.Session(&gorm.Session{...})` to get a new `*DB` that inherits the parent's configuration but with the overrides you specify.
+
+Because `Session` returns a new `*DB` without modifying the original, it is safe to use from multiple goroutines.
+
+## Type definition
+
+```go
+type Session struct {
+    DryRun                   bool
+    PrepareStmt              bool
+    NewDB                    bool
+    Initialized              bool
+    SkipHooks                bool
+    SkipDefaultTransaction   bool
+    DisableNestedTransaction bool
+    AllowGlobalUpdate        bool
+    FullSaveAssociations     bool
+    PropagateUnscoped        bool
+    QueryFields              bool
+    Context                  context.Context
+    Logger                   logger.Interface
+    NowFunc                  func() time.Time
+    CreateBatchSize          int
+}
+```
+
+## Fields
+
+<ParamField path="DryRun" type="bool" default="false">
+  Generate SQL without executing it. The generated SQL is stored in `db.Statement.SQL` and can be retrieved with `db.ToSQL`.
+</ParamField>
+
+<ParamField path="PrepareStmt" type="bool" default="false">
+  Enable prepared statement caching for all queries made through this session. Repeated identical queries skip statement parsing on the server.
+</ParamField>
+
+<ParamField path="NewDB" type="bool" default="false">
+  When `true`, the returned `*DB` starts with a clean statement — no inherited conditions, model, or clauses. Equivalent to a fresh `db` but sharing the same connection pool and configuration.
+
+  ```go
+  tx := db.Where("status = ?", "active").Session(&gorm.Session{NewDB: true})
+  // tx has no WHERE clause — the previous condition was not carried over
+  ```
+</ParamField>
+
+<ParamField path="Initialized" type="bool" default="false">
+  When `true`, `Session` calls `getInstance()` on the returned `*DB`, materialising the statement immediately. Used internally by some GORM operations.
+</ParamField>
+
+<ParamField path="SkipHooks" type="bool" default="false">
+  When `true`, all before/after hooks (callbacks) are skipped for operations on this session. Useful when you want raw database operations without lifecycle callbacks.
+
+  ```go
+  db.Session(&gorm.Session{SkipHooks: true}).Create(&user)
+  ```
+</ParamField>
+
+<ParamField path="SkipDefaultTransaction" type="bool" default="false">
+  Override the global `Config.SkipDefaultTransaction` setting for this session, preventing GORM from wrapping individual create/update/delete operations in a transaction.
+</ParamField>
+
+<ParamField path="DisableNestedTransaction" type="bool" default="false">
+  Override the global `Config.DisableNestedTransaction` setting for this session. When `true`, calling `Transaction` inside an existing transaction runs the callback on the outer transaction without creating a savepoint.
+</ParamField>
+
+<ParamField path="AllowGlobalUpdate" type="bool" default="false">
+  Override the global `Config.AllowGlobalUpdate` setting for this session. When `true`, updates and deletes without WHERE conditions are permitted.
+</ParamField>
+
+<ParamField path="FullSaveAssociations" type="bool" default="false">
+  Override the global `Config.FullSaveAssociations` setting for this session. When `true`, GORM performs a full upsert of nested associations on save.
+</ParamField>
+
+<ParamField path="PropagateUnscoped" type="bool" default="false">
+  When `true`, the `Unscoped` flag is propagated to all nested statements (preloads, association queries) within this session.
+</ParamField>
+
+<ParamField path="QueryFields" type="bool" default="false">
+  When `true`, `SELECT` statements list every column explicitly rather than using `SELECT *`.
+</ParamField>
+
+<ParamField path="Context" type="context.Context">
+  A context to attach to all statements in this session. Cancellations and deadlines from this context propagate to the underlying database driver.
+</ParamField>
+
+<ParamField path="Logger" type="logger.Interface">
+  Override the logger for this session only. `nil` means inherit the parent logger.
+</ParamField>
+
+<ParamField path="NowFunc" type="func() time.Time">
+  Override the function used to generate the current timestamp for this session.
+</ParamField>
+
+<ParamField path="CreateBatchSize" type="int" default="0">
+  Default batch size for `Create` operations in this session. A value of `0` means no batching (unless `Config.CreateBatchSize` is set globally).
+</ParamField>
+
+## Using db.Session
+
+```go
+func (db *DB) Session(config *Session) *DB
+```
+
+`Session` creates a new `*DB` by cloning the current config and selectively applying fields from `*Session`. The original `*DB` is not modified.
+
+<CodeGroup>
+
+```go dry-run.go
+// Generate SQL without hitting the database
+stmt := db.Session(&gorm.Session{DryRun: true})
+stmt.First(&user, 1)
+fmt.Println(stmt.Statement.SQL.String())
+// => SELECT * FROM `users` WHERE `users`.`id` = 1 ORDER BY `users`.`id` LIMIT 1
+```
+
+```go skip-hooks.go
+// Bulk insert without triggering before/after create hooks
+db.Session(&gorm.Session{SkipHooks: true}).CreateInBatches(records, 100)
+```
+
+```go prepared-stmts.go
+// Reuse a prepared statement session for all queries in a request handler
+stmtDB := db.Session(&gorm.Session{PrepareStmt: true})
+for _, id := range ids {
+    stmtDB.First(&user, id)
+}
+```
+
+</CodeGroup>
+
+## Using db.WithContext
+
+```go
+func (db *DB) WithContext(ctx context.Context) *DB
+```
+
+`WithContext` is a convenience wrapper around `Session` that sets only the `Context` field.
+
+```go
+ctx, cancel := context.WithTimeout(r.Context(), 3*time.Second)
+defer cancel()
+
+var users []User
+if err := db.WithContext(ctx).Find(&users).Error; err != nil {
+    // handle timeout or other error
+}
+```
+
+<Tip>
+  For HTTP handlers, always propagate the request context using `db.WithContext(r.Context())`. This ensures that if the client disconnects, the in-flight database query is cancelled.
+</Tip>

@@ -1,0 +1,433 @@
+---
+title: 'Chainable methods'
+description: 'Methods that build up a query by accumulating conditions, clauses, and modifiers. They return *DB and do not execute SQL immediately.'
+---
+
+Chainable methods return a new `*DB` with the additional clause or setting applied. They do not execute any SQL — that happens when you call a [finisher method](/api/finisher-methods). You can chain as many as you need.
+
+```go
+var users []User
+db.Where("age > ?", 18).
+    Order("name ASC").
+    Limit(10).
+    Offset(20).
+    Find(&users)
+```
+
+## Model
+
+```go
+func (db *DB) Model(value interface{}) (tx *DB)
+```
+
+Sets the model for the statement. GORM uses the model to infer the table name and schema when no explicit `Table` is set.
+
+```go
+// Update all users (use with care — requires AllowGlobalUpdate or a WHERE clause)
+db.Model(&User{}).Update("name", "jinzhu")
+
+// Use the primary key from a loaded struct as a WHERE condition
+db.Model(&user).Update("name", "hello")
+```
+
+## Clauses
+
+```go
+func (db *DB) Clauses(conds ...clause.Expression) (tx *DB)
+```
+
+Adds raw `clause.Expression` values directly to the statement. Supports standard clauses (`clause.OrderBy`, `clause.Limit`, `clause.Where`), locking hints, and optimizer hints.
+
+```go
+// Pessimistic locking
+db.Clauses(clause.Locking{Strength: "UPDATE"}).Find(&users)
+
+// Optimizer hint (requires the hints package)
+db.Clauses(hints.UseIndex("idx_user_name")).Find(&users)
+
+// ON CONFLICT upsert
+db.Clauses(clause.OnConflict{
+    Columns:   []clause.Column{{Name: "id"}},
+    DoUpdates: clause.AssignmentColumns([]string{"name", "age"}),
+}).Create(&users)
+```
+
+## Table
+
+```go
+func (db *DB) Table(name string, args ...interface{}) (tx *DB)
+```
+
+Sets the table name explicitly, bypassing the model-based name inference. Supports raw SQL expressions with `args` for parameterised table subqueries.
+
+```go
+// Plain table name
+db.Table("users").Take(&result)
+
+// Schema-qualified table name
+db.Table("public.users").Find(&users)
+
+// Subquery as table source
+db.Table("(?) AS u", db.Model(&User{}).Select("name, email")).Find(&result)
+```
+
+## Distinct
+
+```go
+func (db *DB) Distinct(args ...interface{}) (tx *DB)
+```
+
+Adds `DISTINCT` to the query. If column names are provided they are also passed to `Select`.
+
+```go
+// SELECT DISTINCT name FROM users
+db.Distinct("name").Find(&results)
+
+// SELECT DISTINCT name, age FROM users
+db.Distinct("name", "age").Find(&results)
+```
+
+## Select
+
+```go
+func (db *DB) Select(query interface{}, args ...interface{}) (tx *DB)
+```
+
+Specifies which columns to include in the query. Accepts a string (with optional `?` or `@name` placeholders), a slice of strings, or a raw SQL expression.
+
+```go
+// Named columns
+db.Select("name", "age").Find(&users)
+
+// Column slice
+db.Select([]string{"name", "age"}).Find(&users)
+
+// Expression with placeholder
+db.Select("COALESCE(name, ?) AS name", "unknown").Find(&users)
+```
+
+## Omit
+
+```go
+func (db *DB) Omit(columns ...string) (tx *DB)
+```
+
+Excludes specific columns from create, update, and query operations. Also used to skip association saves when passed an association field name.
+
+```go
+// Skip the Email column when creating
+db.Omit("Email").Create(&user)
+
+// Skip the Languages association when saving
+db.Omit("Languages.*").Create(&user)
+```
+
+## MapColumns
+
+```go
+func (db *DB) MapColumns(m map[string]string) (tx *DB)
+```
+
+Provides a column name mapping applied to query results before scanning into the destination. Keys are result column names; values are the struct field names or target column names.
+
+```go
+db.MapColumns(map[string]string{
+    "full_name": "Name",
+    "user_age":  "Age",
+}).Find(&users)
+```
+
+## Where
+
+```go
+func (db *DB) Where(query interface{}, args ...interface{}) (tx *DB)
+```
+
+Adds AND conditions to the query. Multiple calls to `Where` are combined with `AND`. Accepts a SQL string with `?` or `@name` placeholders, a struct, or a map.
+
+```go
+// SQL string
+db.Where("name = ?", "jinzhu").First(&user)
+
+// Struct (zero values are ignored)
+db.Where(&User{Name: "jinzhu", Age: 20}).First(&user)
+
+// Map
+db.Where(map[string]interface{}{"name": "jinzhu", "age": 20}).Find(&users)
+
+// Chained AND
+db.Where("name = ?", "jinzhu").Where("age <> ?", 20).First(&user)
+```
+
+<Tip>
+  Use `gorm.Expr` inside `Where` to pass raw SQL expressions as values:
+  `db.Where("price > ?", gorm.Expr("original_price * 0.8"))`
+</Tip>
+
+## Not
+
+```go
+func (db *DB) Not(query interface{}, args ...interface{}) (tx *DB)
+```
+
+Adds a `NOT` condition. Accepts the same argument formats as `Where`.
+
+```go
+// NOT name = 'jinzhu'
+db.Not("name = ?", "jinzhu").First(&user)
+
+// NOT IN
+db.Not(map[string]interface{}{"name": []string{"jinzhu", "jinzhu 2"}}).Find(&users)
+```
+
+## Or
+
+```go
+func (db *DB) Or(query interface{}, args ...interface{}) (tx *DB)
+```
+
+Adds an `OR` condition chained to the preceding `WHERE` conditions.
+
+```go
+// WHERE name = 'jinzhu' OR name = 'john'
+db.Where("name = ?", "jinzhu").Or("name = ?", "john").First(&user)
+
+// OR with struct
+db.Where("name = 'jinzhu'").Or(User{Name: "john", Age: 20}).Find(&users)
+```
+
+## Joins
+
+```go
+func (db *DB) Joins(query string, args ...interface{}) (tx *DB)
+```
+
+Adds a `LEFT JOIN` clause. Can reference a named association or a raw SQL `JOIN` expression. When a `*DB` is passed as the sole extra argument, it is used as a scoped association join.
+
+```go
+// Association join (preloads the joined fields)
+db.Joins("Account").Find(&users)
+
+// Raw SQL join
+db.Joins("JOIN emails ON emails.user_id = users.id AND emails.email = ?",
+    "jinzhu@example.org").Find(&users)
+
+// Scoped association join
+db.Joins("Account",
+    db.Select("id").Where("user_id = users.id AND name = ?", "someName").Model(&Account{}),
+).Find(&users)
+```
+
+## InnerJoins
+
+```go
+func (db *DB) InnerJoins(query string, args ...interface{}) (tx *DB)
+```
+
+Like `Joins` but produces an `INNER JOIN` instead of `LEFT JOIN`.
+
+```go
+db.InnerJoins("Account").Find(&users)
+```
+
+## Group
+
+```go
+func (db *DB) Group(name string) (tx *DB)
+```
+
+Adds a `GROUP BY` clause.
+
+```go
+// SELECT name, sum(age) AS total FROM users GROUP BY name
+db.Model(&User{}).Select("name, sum(age) as total").Group("name").Find(&results)
+```
+
+## Having
+
+```go
+func (db *DB) Having(query interface{}, args ...interface{}) (tx *DB)
+```
+
+Adds a `HAVING` clause after `GROUP BY`. Accepts the same argument formats as `Where`.
+
+```go
+// SELECT name, sum(age) AS total FROM users GROUP BY name HAVING name = 'jinzhu'
+db.Model(&User{}).
+    Select("name, sum(age) as total").
+    Group("name").
+    Having("name = ?", "jinzhu").
+    Find(&result)
+```
+
+## Order
+
+```go
+func (db *DB) Order(value interface{}) (tx *DB)
+```
+
+Specifies the `ORDER BY` direction. Accepts a string, a `clause.OrderByColumn`, or a `clause.OrderBy` for multiple columns.
+
+```go
+// String
+db.Order("name DESC").Find(&users)
+
+// Struct with direction
+db.Order(clause.OrderByColumn{
+    Column: clause.Column{Name: "name"},
+    Desc:   true,
+}).Find(&users)
+
+// Multiple columns
+db.Order(clause.OrderBy{
+    Columns: []clause.OrderByColumn{
+        {Column: clause.Column{Name: "name"}, Desc: true},
+        {Column: clause.Column{Name: "age"}, Desc: false},
+    },
+}).Find(&users)
+```
+
+## Limit
+
+```go
+func (db *DB) Limit(limit int) (tx *DB)
+```
+
+Limits the number of records returned. Pass `-1` to cancel a previously set limit.
+
+```go
+// Retrieve at most 3 records
+db.Limit(3).Find(&users)
+
+// Cancel a previously set limit
+db.Limit(3).Find(&users1).Limit(-1).Find(&users2)
+```
+
+## Offset
+
+```go
+func (db *DB) Offset(offset int) (tx *DB)
+```
+
+Skips the specified number of records before returning results. Pass `-1` to cancel a previously set offset.
+
+```go
+// Skip first 5 records
+db.Offset(5).Find(&users)
+
+// Cancel offset
+db.Offset(5).Offset(-1).Find(&users)
+```
+
+## Scopes
+
+```go
+func (db *DB) Scopes(funcs ...func(*DB) *DB) (tx *DB)
+```
+
+Registers one or more reusable query functions. The functions are applied lazily when a finisher method is called, each receiving and returning a `*DB`.
+
+```go
+func AmountGreaterThan1000(db *gorm.DB) *gorm.DB {
+    return db.Where("amount > ?", 1000)
+}
+
+func OrderStatus(status []string) func(*gorm.DB) *gorm.DB {
+    return func(db *gorm.DB) *gorm.DB {
+        return db.Where("status IN (?)", status)
+    }
+}
+
+db.Scopes(
+    AmountGreaterThan1000,
+    OrderStatus([]string{"paid", "shipped"}),
+).Find(&orders)
+```
+
+## Preload
+
+```go
+func (db *DB) Preload(query string, args ...interface{}) (tx *DB)
+```
+
+Eagerly loads an association in a separate SQL query after the primary query. Multiple `Preload` calls can be chained to load multiple associations. Use `clause.Associations` to preload all.
+
+```go
+// Preload all orders
+db.Preload("Orders").Find(&users)
+
+// Preload with condition
+db.Preload("Orders", "state NOT IN (?)", "cancelled").Find(&users)
+
+// Nested preload
+db.Preload("Orders.OrderItems").Find(&users)
+
+// Preload all associations
+db.Preload(clause.Associations).Find(&users)
+```
+
+## Attrs
+
+```go
+func (db *DB) Attrs(attrs ...interface{}) (tx *DB)
+```
+
+Sets attributes to be assigned to the record only when it is **not found** (used with `FirstOrInit` and `FirstOrCreate`). If the record exists, `Attrs` values are ignored.
+
+```go
+// Email is only set when the record is not found
+db.Where(User{Name: "non_existing"}).
+    Attrs(User{Email: "fake@fake.org"}).
+    FirstOrInit(&user)
+```
+
+## Assign
+
+```go
+func (db *DB) Assign(attrs ...interface{}) (tx *DB)
+```
+
+Sets attributes to be assigned to the record regardless of whether it was found or not (used with `FirstOrInit` and `FirstOrCreate`). With `FirstOrCreate`, existing records are updated.
+
+```go
+// Email is always set, even if the record exists
+db.Where(User{Name: "jinzhu"}).
+    Assign(User{Email: "fake@fake.org"}).
+    FirstOrInit(&user)
+```
+
+## Unscoped
+
+```go
+func (db *DB) Unscoped() (tx *DB)
+```
+
+Disables soft-delete filtering for the query. Records with a non-null `DeletedAt` (or equivalent) are included in results and can be hard-deleted.
+
+```go
+// Query includes soft-deleted records
+db.Unscoped().Find(&users)
+
+// Permanently delete a soft-deleted record
+db.Unscoped().Delete(&user)
+```
+
+## Raw
+
+```go
+func (db *DB) Raw(sql string, values ...interface{}) (tx *DB)
+```
+
+Sets a raw SQL string as the statement. Used in combination with `Scan` or `Rows` to execute arbitrary queries. Supports both `?` positional and `@name` named placeholders.
+
+```go
+// Positional placeholder
+db.Raw("SELECT id, name FROM users WHERE name = ?", "jinzhu").Scan(&result)
+
+// Named placeholder
+db.Raw("SELECT * FROM users WHERE name = @name", sql.Named("name", "jinzhu")).Scan(&users)
+```
+
+<Note>
+  `Raw` sets the SQL string directly on the statement. Call a finisher such as `Scan`, `Rows`, or `Row` to execute it — do not follow `Raw` with `Find`, `First`, etc.
+</Note>

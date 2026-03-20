@@ -1,0 +1,196 @@
+---
+title: Many to many
+description: Define a many-to-many relationship between two models using an automatically managed join table.
+---
+
+A `many to many` relationship links two models where each can be associated with multiple instances of the other. GORM manages this through a join table that holds foreign keys for both sides.
+
+## Struct definition
+
+Use the `many2many` tag to name the join table:
+
+```go
+type User struct {
+  gorm.Model
+  Languages []Language `gorm:"many2many:user_languages;"`
+}
+
+type Language struct {
+  gorm.Model
+  Name string
+}
+```
+
+GORM auto-creates a `user_languages` join table with columns `user_id` and `language_id` when you run `AutoMigrate`.
+
+## Back-reference
+
+You can define the relationship from both sides:
+
+```go
+type User struct {
+  gorm.Model
+  Languages []*Language `gorm:"many2many:user_languages;"`
+}
+
+type Language struct {
+  gorm.Model
+  Name  string
+  Users []*User `gorm:"many2many:user_languages;"`
+}
+```
+
+## Override join table foreign keys
+
+Use `joinForeignKey` and `joinReferences` to rename the join table columns:
+
+```go
+type User struct {
+  gorm.Model
+  Languages []Language `gorm:"many2many:user_languages;joinForeignKey:UserReferID;joinReferences:LangReferID"`
+}
+
+type Language struct {
+  gorm.Model
+  Name string
+}
+// Join table: user_languages (user_refer_id, lang_refer_id)
+```
+
+## Custom join table
+
+To add extra columns to the join table, define a dedicated struct and register it with `SetupJoinTable`:
+
+```go
+type UserLanguage struct {
+  UserID     int    `gorm:"primaryKey"`
+  LanguageID int    `gorm:"primaryKey"`
+  CreatedAt  time.Time
+  Fluency    string // custom column
+}
+
+// Register the custom join table before AutoMigrate
+db.SetupJoinTable(&User{}, "Languages", &UserLanguage{})
+db.AutoMigrate(&User{}, &Language{}, &UserLanguage{})
+```
+
+Now you can write to the extra column:
+
+```go
+db.Model(&user).Association("Languages").Append(&Language{Name: "French"})
+// To set Fluency, create the join record directly:
+db.Create(&UserLanguage{
+  UserID:     user.ID,
+  LanguageID: french.ID,
+  Fluency:    "advanced",
+})
+```
+
+<Note>
+The custom join table struct must include all primary key fields from both sides. GORM uses them to build the composite primary key.
+</Note>
+
+## Create with a Many2Many association
+
+Create a user with associated languages in one call:
+
+```go
+user := User{
+  Languages: []Language{
+    {Name: "English"},
+    {Name: "Chinese"},
+  },
+}
+db.Create(&user)
+// INSERT INTO users DEFAULT VALUES;
+// INSERT INTO languages (name) VALUES ('English'), ('Chinese');
+// INSERT INTO user_languages (user_id, language_id) VALUES (1, 1), (1, 2);
+```
+
+Associate an existing language with a user:
+
+```go
+english := Language{}
+db.First(&english, "name = ?", "English")
+db.Model(&user).Association("Languages").Append(&english)
+```
+
+## Query with Preload
+
+```go
+var users []User
+db.Preload("Languages").Find(&users)
+// SELECT * FROM users;
+// SELECT * FROM languages
+//   INNER JOIN user_languages ON user_languages.language_id = languages.id
+//   WHERE user_languages.user_id IN (1, 2, 3);
+```
+
+### Conditional preload
+
+```go
+db.Preload("Languages", "name = ?", "English").Find(&users)
+
+// Using a function
+db.Preload("Languages", func(db *gorm.DB) *gorm.DB {
+  return db.Order("languages.name ASC")
+}).Find(&users)
+```
+
+## Association mode operations
+
+```go
+var user User
+db.First(&user, 1)
+
+// Find all languages for this user
+var languages []Language
+db.Model(&user).Association("Languages").Find(&languages)
+
+// Append a new language
+db.Model(&user).Association("Languages").Append(&Language{Name: "French"})
+
+// Replace all languages
+db.Model(&user).Association("Languages").Replace(
+  []Language{{Name: "Spanish"}, {Name: "Portuguese"}},
+)
+
+// Remove a specific language from the user (deletes join table row only)
+db.Model(&user).Association("Languages").Delete(&Language{ID: 1})
+
+// Remove all language associations (truncates join table rows for this user)
+db.Model(&user).Association("Languages").Clear()
+
+// Count languages
+count := db.Model(&user).Association("Languages").Count()
+```
+
+<Tip>
+For many-to-many, `Delete` and `Clear` only remove rows from the join table. The `Language` records themselves are not deleted. Use `Unscoped()` to permanently delete the join rows when soft-delete is involved.
+</Tip>
+
+## Self-referential many-to-many
+
+A model can have a many-to-many relationship with itself:
+
+```go
+type User struct {
+  gorm.Model
+  Friends []*User `gorm:"many2many:user_friends;"`
+}
+```
+
+GORM generates a join table `user_friends(user_id, friend_id)` for this.
+
+## Constraints
+
+Foreign key constraints on many-to-many join tables use the same tag syntax:
+
+```go
+type User struct {
+  gorm.Model
+  Languages []Language `gorm:"many2many:user_languages;constraint:OnDelete:CASCADE;"`
+}
+```
+
+This cascades deletes to the join table rows when a `User` or `Language` is deleted.

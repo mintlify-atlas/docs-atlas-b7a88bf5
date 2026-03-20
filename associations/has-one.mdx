@@ -1,0 +1,159 @@
+---
+title: Has one
+description: Define a one-to-one relationship where the foreign key is stored on the associated model's table.
+---
+
+A `has one` association establishes a one-to-one relationship between two models. Unlike `belongs to`, the foreign key lives on the associated model's table, not on the declaring model.
+
+## Struct definition
+
+```go
+type User struct {
+  gorm.Model
+  CreditCard CreditCard
+}
+
+type CreditCard struct {
+  gorm.Model
+  Number string
+  UserID uint  // foreign key — references users.id
+}
+```
+
+GORM infers the `has one` relationship from the struct field type. The foreign key on `CreditCard` is `UserID` by convention (`<OwnerType>ID`).
+
+## Override the foreign key
+
+Use the `foreignKey` tag to use a different field name on the associated model:
+
+```go
+type User struct {
+  gorm.Model
+  CreditCard CreditCard `gorm:"foreignKey:UserRefer"`
+}
+
+type CreditCard struct {
+  gorm.Model
+  Number    string
+  UserRefer uint
+}
+```
+
+## Override references
+
+By default GORM uses the owner's primary key as the reference. Point to a different field with `references`:
+
+```go
+type User struct {
+  gorm.Model
+  MemberNumber string     `gorm:"unique"`
+  CreditCard   CreditCard `gorm:"foreignKey:UserMemberNumber;references:MemberNumber"`
+}
+
+type CreditCard struct {
+  gorm.Model
+  Number           string
+  UserMemberNumber string
+}
+```
+
+## Create with a HasOne association
+
+When you create a `User`, GORM creates the associated `CreditCard` in the same transaction if the struct is populated:
+
+```go
+user := User{
+  CreditCard: CreditCard{Number: "4111-1111-1111-1111"},
+}
+db.Create(&user)
+// INSERT INTO users DEFAULT VALUES;
+// INSERT INTO credit_cards (number, user_id) VALUES ('4111-1111-1111-1111', 1);
+```
+
+To skip saving the association, use `Select` or `Omit`:
+
+```go
+db.Select("Name").Create(&user)    // only save Name field, skip associations
+db.Omit("CreditCard").Create(&user) // skip CreditCard association
+```
+
+## Query with Preload
+
+Eagerly load the associated record alongside the owner:
+
+```go
+var users []User
+db.Preload("CreditCard").Find(&users)
+// SELECT * FROM users;
+// SELECT * FROM credit_cards WHERE user_id IN (1, 2, 3);
+```
+
+Load a single user:
+
+```go
+var user User
+db.Preload("CreditCard").First(&user, 1)
+```
+
+### Conditional preload
+
+Filter associated records with a condition string or a function:
+
+```go
+// Only preload active credit cards
+db.Preload("CreditCard", "number LIKE ?", "4111%").Find(&users)
+
+// Using a function
+db.Preload("CreditCard", func(db *gorm.DB) *gorm.DB {
+  return db.Where("number IS NOT NULL")
+}).Find(&users)
+```
+
+## Query with Joins
+
+`Joins` loads the association using a LEFT JOIN in a single SQL statement:
+
+```go
+var users []User
+db.Joins("CreditCard").Find(&users)
+// SELECT users.*, credit_cards.id AS "CreditCard__id", credit_cards.number AS "CreditCard__number"
+// FROM users LEFT JOIN credit_cards ON credit_cards.user_id = users.id;
+```
+
+<Tip>
+Use `InnerJoins` instead of `Joins` when you only want users that have a credit card:
+
+```go
+db.InnerJoins("CreditCard").Find(&users)
+```
+</Tip>
+
+## Update a HasOne association
+
+Use `Association` mode to replace the current associated record:
+
+```go
+newCard := CreditCard{Number: "5500-0000-0000-0004"}
+db.Model(&user).Association("CreditCard").Replace(&newCard)
+```
+
+To remove the association without deleting the record (sets the foreign key to NULL):
+
+```go
+db.Model(&user).Association("CreditCard").Clear()
+```
+
+## Constraints
+
+Define referential actions on the foreign key constraint:
+
+```go
+type User struct {
+  gorm.Model
+  CreditCard CreditCard `gorm:"constraint:OnUpdate:CASCADE,OnDelete:SET NULL;"`
+}
+```
+
+<Warning>
+If you use `OnDelete:CASCADE`, deleting a `User` will also delete their `CreditCard` at the database level. Make sure this matches your application's intent.
+</Warning>

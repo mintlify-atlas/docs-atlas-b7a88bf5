@@ -1,0 +1,225 @@
+---
+title: 'Interfaces'
+description: 'Go interfaces defined by GORM for dialectors, plugins, connection pools, transactions, and custom type values.'
+---
+
+GORM defines a set of interfaces that allow you to extend its behaviour — from providing a database driver to implementing custom value serialisers. Driver authors implement `Dialector`; plugin authors implement `Plugin`; custom types implement `Valuer`.
+
+## Dialector
+
+```go
+type Dialector interface {
+    Name() string
+    Initialize(*DB) error
+    Migrator(db *DB) Migrator
+    DataTypeOf(*schema.Field) string
+    DefaultValueOf(*schema.Field) clause.Expression
+    BindVarTo(writer clause.Writer, stmt *Statement, v interface{})
+    QuoteTo(clause.Writer, string)
+    Explain(sql string, vars ...interface{}) string
+}
+```
+
+The primary extension point for database driver authors. GORM calls `Initialize` once during `Open` to set up the connection pool, then uses the remaining methods during query building and migration.
+
+| Method | When called |
+|--------|-------------|
+| `Name()` | Plugin registration, error messages |
+| `Initialize(*DB)` | Once during `gorm.Open` |
+| `Migrator(*DB)` | When `db.Migrator()` is called |
+| `DataTypeOf(*schema.Field)` | AutoMigrate column type resolution |
+| `DefaultValueOf(*schema.Field)` | AutoMigrate default value clauses |
+| `BindVarTo(...)` | Bind variable rendering (e.g., `$1` for Postgres, `?` for MySQL) |
+| `QuoteTo(...)` | Identifier quoting (e.g., backticks vs double quotes) |
+| `Explain(...)` | SQL string interpolation for logging and `ToSQL` |
+
+---
+
+## Plugin
+
+```go
+type Plugin interface {
+    Name() string
+    Initialize(*DB) error
+}
+```
+
+Implemented by GORM plugins (e.g., prometheus metrics, soft-delete extensions). Register a plugin with `db.Use(plugin)`. GORM calls `Initialize` once and stores the plugin by its `Name`.
+
+```go
+type MyPlugin struct{}
+
+func (p *MyPlugin) Name() string { return "my_plugin" }
+func (p *MyPlugin) Initialize(db *gorm.DB) error {
+    db.Callback().Create().Before("gorm:create").Register("my_plugin:before_create", func(db *gorm.DB) {
+        // custom logic
+    })
+    return nil
+}
+
+db.Use(&MyPlugin{})
+```
+
+---
+
+## ParamsFilter
+
+```go
+type ParamsFilter interface {
+    ParamsFilter(ctx context.Context, sql string, params ...interface{}) (string, []interface{})
+}
+```
+
+Optionally implemented by a `ConnPool`. When present, GORM passes the SQL and its bind variables through `ParamsFilter` before execution, allowing the pool to redact sensitive values from logs.
+
+---
+
+## ConnPool
+
+```go
+type ConnPool interface {
+    PrepareContext(ctx context.Context, query string) (*sql.Stmt, error)
+    ExecContext(ctx context.Context, query string, args ...interface{}) (sql.Result, error)
+    QueryContext(ctx context.Context, query string, args ...interface{}) (*sql.Rows, error)
+    QueryRowContext(ctx context.Context, query string, args ...interface{}) *sql.Row
+}
+```
+
+The minimal interface that any connection pool must satisfy for GORM to execute statements. `*sql.DB` and `*sql.Tx` both implement this interface. You can provide a custom implementation (e.g., a read replica router) via `Config.ConnPool`.
+
+---
+
+## SavePointerDialectorInterface
+
+```go
+type SavePointerDialectorInterface interface {
+    SavePoint(tx *DB, name string) error
+    RollbackTo(tx *DB, name string) error
+}
+```
+
+Optionally implemented by dialectors that support transaction savepoints. When this interface is implemented, `db.SavePoint(name)` and `db.RollbackTo(name)` work. If not implemented, those methods return `ErrUnsupportedDriver`.
+
+---
+
+## TxBeginner
+
+```go
+type TxBeginner interface {
+    BeginTx(ctx context.Context, opts *sql.TxOptions) (*sql.Tx, error)
+}
+```
+
+Implemented by `*sql.DB`. GORM calls `BeginTx` to start a transaction when the current connection pool is a plain `*sql.DB`.
+
+---
+
+## ConnPoolBeginner
+
+```go
+type ConnPoolBeginner interface {
+    BeginTx(ctx context.Context, opts *sql.TxOptions) (ConnPool, error)
+}
+```
+
+Like `TxBeginner`, but `BeginTx` returns a `ConnPool` instead of `*sql.Tx`. Implement this on a custom pool to return a custom transactional pool (for example, a read-replica router that switches to the primary during a transaction).
+
+---
+
+## TxCommitter
+
+```go
+type TxCommitter interface {
+    Commit() error
+    Rollback() error
+}
+```
+
+Implemented by `*sql.Tx`. GORM checks whether the current `ConnPool` satisfies this interface to determine if a transaction is active. `db.Commit()` and `db.Rollback()` delegate to this interface.
+
+---
+
+## Tx
+
+```go
+type Tx interface {
+    ConnPool
+    TxCommitter
+    StmtContext(ctx context.Context, stmt *sql.Stmt) *sql.Stmt
+}
+```
+
+A composite interface representing a full transaction connection: it embeds `ConnPool` (for query execution), `TxCommitter` (for commit/rollback), and adds `StmtContext` for creating transaction-bound prepared statements. `*sql.Tx` satisfies this interface.
+
+---
+
+## Valuer
+
+```go
+type Valuer interface {
+    GormValue(context.Context, *DB) clause.Expr
+}
+```
+
+Implemented by custom types that need to control how their value is rendered in SQL. Return a `clause.Expr` to provide the SQL fragment and bind variables.
+
+```go
+type Point struct { X, Y float64 }
+
+func (p Point) GormValue(ctx context.Context, db *gorm.DB) clause.Expr {
+    return clause.Expr{
+        SQL:  "ST_PointFromText(?)",
+        Vars: []interface{}{fmt.Sprintf("POINT(%g %g)", p.X, p.Y)},
+    }
+}
+```
+
+---
+
+## GetDBConnector
+
+```go
+type GetDBConnector interface {
+    GetDBConn() (*sql.DB, error)
+}
+```
+
+Optionally implemented by a `ConnPool` to expose the underlying `*sql.DB`. `db.DB()` checks for this interface before falling back to a direct type assertion on the pool.
+
+---
+
+## Rows
+
+```go
+type Rows interface {
+    Columns() ([]string, error)
+    ColumnTypes() ([]*sql.ColumnType, error)
+    Next() bool
+    Scan(dest ...interface{}) error
+    Err() error
+    Close() error
+}
+```
+
+Abstracts a rows cursor. `*sql.Rows` satisfies this interface. GORM uses `Rows` internally when scanning query results, and you can implement it for testing with mock rows.
+
+---
+
+## ErrorTranslator
+
+```go
+type ErrorTranslator interface {
+    Translate(err error) error
+}
+```
+
+Optionally implemented by a `Dialector`. When `Config.TranslateError` is `true` and the dialector implements this interface, GORM passes every database error through `Translate` before storing it on `db.Error`. Dialectors use this to map driver-specific error codes to standard GORM errors such as `ErrDuplicatedKey` and `ErrForeignKeyViolated`.
+
+```go
+func (d *MyDialector) Translate(err error) error {
+    if isUniqueViolation(err) {
+        return gorm.ErrDuplicatedKey
+    }
+    return err
+}
+```

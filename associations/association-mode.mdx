@@ -1,0 +1,225 @@
+---
+title: Association mode
+description: Use the Association API to find, append, replace, delete, clear, and count associated records on a loaded model.
+---
+
+Association mode provides a set of helper methods for working with relationships on an already-loaded model instance. Access it by calling `db.Model(&record).Association("FieldName")`.
+
+```go
+// Association struct (from association.go)
+// type Association struct {
+//   DB           *DB
+//   Relationship *schema.Relationship
+//   Unscope      bool
+//   Error        error
+// }
+
+association := db.Model(&user).Association("Languages")
+if association.Error != nil {
+  // handle error
+}
+```
+
+<Note>
+You must have a loaded model value (with a valid primary key) before calling `Association`. GORM uses the model's primary key to scope all queries.
+</Note>
+
+## Find
+
+Retrieve all records associated with the model:
+
+```go
+var languages []Language
+db.Model(&user).Association("Languages").Find(&languages)
+```
+
+Pass additional conditions as extra arguments:
+
+```go
+db.Model(&user).Association("Languages").Find(&languages, "name IN ?", []string{"English", "French"})
+```
+
+## Append
+
+Add new associated records without removing existing ones:
+
+```go
+// Append a single record
+db.Model(&user).Association("Languages").Append(&Language{Name: "German"})
+
+// Append multiple records
+db.Model(&user).Association("Languages").Append(
+  &Language{Name: "Spanish"},
+  &Language{Name: "Portuguese"},
+)
+
+// Append a slice
+langs := []Language{{Name: "Japanese"}, {Name: "Korean"}}
+db.Model(&user).Association("Languages").Append(&langs)
+```
+
+<Note>
+For `has one` and `belongs to` associations, `Append` behaves identically to `Replace` — it replaces the current associated record rather than adding to it.
+</Note>
+
+## Replace
+
+Swap out all current associations with a new set:
+
+```go
+// Replace all languages with a new list
+db.Model(&user).Association("Languages").Replace(
+  []Language{{Name: "English"}, {Name: "Chinese"}},
+)
+
+// For has_one / belongs_to — replace the single associated record
+db.Model(&user).Association("CreditCard").Replace(&CreditCard{Number: "4111-1111-1111-1111"})
+```
+
+For `has one` and `has many`, the old associated records have their foreign keys set to `NULL`. For `many to many`, the old join table rows are deleted.
+
+## Delete
+
+Remove specific records from the association:
+
+```go
+// Remove a single record
+db.Model(&user).Association("Languages").Delete(&language)
+
+// Remove multiple records
+db.Model(&user).Association("CreditCards").Delete(
+  &CreditCard{ID: 1},
+  &CreditCard{ID: 2},
+)
+
+// Remove using a slice
+db.Model(&user).Association("CreditCards").Delete(&[]CreditCard{{ID: 3}, {ID: 4}})
+```
+
+`Delete` only removes the association link:
+- For `has one` / `has many`: sets the foreign key to `NULL`.
+- For `many to many`: deletes the join table row.
+- For `belongs to`: sets the foreign key on the owner to `NULL`.
+
+The associated records themselves are **not** deleted from their table unless you use `Unscoped`.
+
+## Clear
+
+Remove **all** associations from the model:
+
+```go
+db.Model(&user).Association("Languages").Clear()
+// Removes all rows from user_languages for this user
+
+db.Model(&user).Association("CreditCards").Clear()
+// Sets user_id = NULL on all credit cards belonging to this user
+```
+
+`Clear` is equivalent to calling `Replace` with no arguments.
+
+## Count
+
+Return the number of associated records:
+
+```go
+count := db.Model(&user).Association("Languages").Count()
+fmt.Println(count) // e.g. 3
+```
+
+## Unscoped
+
+By default, `Delete` and `Clear` only unlink associations (set foreign keys to NULL or delete join rows). Use `Unscoped()` to permanently delete the associated records themselves:
+
+```go
+// Permanently delete the associated credit card record
+db.Model(&user).Association("CreditCard").Unscoped().Delete(&creditCard)
+
+// Permanently delete all associated records
+db.Model(&user).Association("CreditCards").Unscoped().Clear()
+```
+
+<Warning>
+`Unscoped().Clear()` permanently deletes the associated records from the database, not just the link. Use with caution.
+</Warning>
+
+When using soft-delete models, `Unscoped` also makes `Find` return soft-deleted records:
+
+```go
+var languages []Language
+db.Model(&user).Association("Languages").Unscoped().Find(&languages)
+// Includes soft-deleted languages
+```
+
+## Batch operations
+
+All Association methods support batch operations when the model is a slice. Each element in the model slice maps positionally to the corresponding element in the values slice:
+
+```go
+var users []User
+db.Find(&users)
+
+// Append one language per user (positional mapping)
+db.Model(&users).Association("Languages").Append(
+  []Language{{Name: "English"}, {Name: "French"}, {Name: "Spanish"}},
+)
+// users[0] gets English, users[1] gets French, users[2] gets Spanish
+
+// Clear all language associations for every user in the slice
+db.Model(&users).Association("Languages").Clear()
+```
+
+<Warning>
+When using `Append` or `Replace` with a slice model, the values slice length must match the model slice length. A mismatch returns `ErrInvalidValueOfLength`.
+</Warning>
+
+## Error handling
+
+Association mode collects errors on the `Association.Error` field. Check it after retrieving the association handle:
+
+```go
+association := db.Model(&user).Association("Languages")
+if association.Error != nil {
+  log.Fatal(association.Error)
+}
+
+// Each method also returns an error directly
+if err := association.Append(&language); err != nil {
+  log.Fatal(err)
+}
+
+if err := association.Clear(); err != nil {
+  log.Fatal(err)
+}
+```
+
+<AccordionGroup>
+  <Accordion title="Common errors">
+    - `ErrUnsupportedRelation` — the field name passed to `Association()` does not correspond to any defined relationship on the model's schema.
+    - `ErrPrimaryKeyRequired` — the model value does not have a primary key set. Ensure you load the record from the database before calling `Association`.
+    - `ErrInvalidValueOfLength` — for batch operations, the values slice length does not match the model slice length.
+    - `ErrInvalidValue` — a non-addressable value was passed to `Append` or `Replace` for a struct-typed relationship.
+  </Accordion>
+</AccordionGroup>
+
+## Quick reference
+
+<Columns cols={2}>
+  <Card title="Find" icon="magnifying-glass">
+    Retrieve associated records, with optional extra conditions.
+  </Card>
+  <Card title="Append" icon="plus">
+    Add one or more records to the association without removing existing ones.
+  </Card>
+  <Card title="Replace" icon="arrow-right-arrow-left">
+    Swap the entire association set with a new one.
+  </Card>
+  <Card title="Delete" icon="trash">
+    Remove specific records from the association link.
+  </Card>
+  <Card title="Clear" icon="x">
+    Remove all association links for this model.
+  </Card>
+  <Card title="Count" icon="hash">
+    Return the number of associated records.
+  </Card>
+</Columns>

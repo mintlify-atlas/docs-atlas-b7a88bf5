@@ -1,122 +1,134 @@
 {
   "$schema": "https://mintlify.com/docs.json",
-  "theme": "mint",
-  "name": "Mint Starter Kit",
+  "name": "GORM",
+  "theme": "palm",
   "colors": {
-    "primary": "#16A34A",
-    "light": "#07C983",
-    "dark": "#15803D"
+    "primary": "#0489fc",
+    "light": "#42b4f7",
+    "dark": "#162731"
   },
-  "favicon": "/favicon.svg",
+  "favicon": "https://media.brand.dev/81fbbf6d-e2e5-453f-b32d-300c634091f6.png",
+  "logo": {
+    "light": "https://media.brand.dev/196dd3de-5580-4788-9d77-708172bc9cda.svg",
+    "dark": "https://media.brand.dev/196dd3de-5580-4788-9d77-708172bc9cda.svg"
+  },
+  "navbar": {
+    "primary": {
+      "type": "github",
+      "href": "https://github.com/go-gorm/gorm"
+    }
+  },
+  "footer": {
+    "socials": {
+      "github": "https://github.com/go-gorm/gorm"
+    }
+  },
   "navigation": {
     "tabs": [
       {
-        "tab": "Guides",
+        "tab": "Documentation",
         "groups": [
           {
-            "group": "Getting started",
+            "group": "Get Started",
             "pages": [
-              "index",
+              "introduction",
               "quickstart",
-              "development"
+              "connecting-to-database"
             ]
           },
           {
-            "group": "Customization",
+            "group": "Models",
             "pages": [
-              "essentials/settings",
-              "essentials/navigation"
+              "models/declaring-models",
+              "models/conventions",
+              "models/embedded-struct"
             ]
           },
           {
-            "group": "Writing content",
+            "group": "CRUD Operations",
             "pages": [
-              "essentials/markdown",
-              "essentials/code",
-              "essentials/images",
-              "essentials/reusable-snippets"
+              "crud/create",
+              "crud/query",
+              "crud/update",
+              "crud/delete"
             ]
           },
           {
-            "group": "AI tools",
+            "group": "Associations",
             "pages": [
-              "ai-tools/cursor",
-              "ai-tools/claude-code",
-              "ai-tools/windsurf"
+              "associations/belongs-to",
+              "associations/has-one",
+              "associations/has-many",
+              "associations/many-to-many",
+              "associations/association-mode"
+            ]
+          },
+          {
+            "group": "Advanced Features",
+            "pages": [
+              "advanced/hooks",
+              "advanced/transactions",
+              "advanced/scopes",
+              "advanced/sql-builder",
+              "advanced/soft-delete",
+              "advanced/auto-migrate"
+            ]
+          },
+          {
+            "group": "Configuration & Logging",
+            "pages": [
+              "configuration/config",
+              "configuration/logger",
+              "configuration/prepared-statements"
+            ]
+          },
+          {
+            "group": "Extending GORM",
+            "pages": [
+              "extending/plugins",
+              "extending/callbacks",
+              "extending/dialectors"
             ]
           }
         ]
       },
       {
-        "tab": "API reference",
+        "tab": "API Reference",
         "groups": [
           {
-            "group": "API documentation",
+            "group": "Core",
             "pages": [
-              "api-reference/introduction"
+              "api/db",
+              "api/config",
+              "api/session"
             ]
           },
           {
-            "group": "Endpoint examples",
+            "group": "Chainable Methods",
             "pages": [
-              "api-reference/endpoint/get",
-              "api-reference/endpoint/create",
-              "api-reference/endpoint/delete",
-              "api-reference/endpoint/webhook"
+              "api/chainable-methods"
+            ]
+          },
+          {
+            "group": "Finisher Methods",
+            "pages": [
+              "api/finisher-methods"
+            ]
+          },
+          {
+            "group": "Interfaces",
+            "pages": [
+              "api/interfaces"
+            ]
+          },
+          {
+            "group": "Errors",
+            "pages": [
+              "api/errors"
             ]
           }
         ]
       }
-    ],
-    "global": {
-      "anchors": [
-        {
-          "anchor": "Documentation",
-          "href": "https://mintlify.com/docs",
-          "icon": "book-open-cover"
-        },
-        {
-          "anchor": "Blog",
-          "href": "https://mintlify.com/blog",
-          "icon": "newspaper"
-        }
-      ]
-    }
-  },
-  "logo": {
-    "light": "/logo/light.svg",
-    "dark": "/logo/dark.svg"
-  },
-  "navbar": {
-    "links": [
-      {
-        "label": "Support",
-        "href": "mailto:hi@mintlify.com"
-      }
-    ],
-    "primary": {
-      "type": "button",
-      "label": "Dashboard",
-      "href": "https://dashboard.mintlify.com"
-    }
-  },
-  "contextual": {
-    "options": [
-     "copy",
-     "view",
-     "chatgpt",
-     "claude",
-     "perplexity",
-     "mcp",
-     "cursor",
-     "vscode"
-   ]
-  },
-  "footer": {
-    "socials": {
-      "x": "https://x.com/mintlify",
-      "github": "https://github.com/mintlify",
-      "linkedin": "https://linkedin.com/company/mintlify"
-    }
+    ]
   }
 }

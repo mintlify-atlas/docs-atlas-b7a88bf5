@@ -1,0 +1,217 @@
+---
+title: Embedded structs
+description: Compose models from reusable structs using embedding, the embedded tag, and embeddedPrefix for column name prefixing.
+---
+
+GORM supports struct embedding, letting you define common fields once and share them across multiple models. Embedded fields are flattened into the parent table — there is no table inheritance.
+
+## Embedding gorm.Model
+
+The simplest form of embedding is using `gorm.Model`, which provides `ID`, `CreatedAt`, `UpdatedAt`, and `DeletedAt`:
+
+```go
+type Model struct {
+    ID        uint           `gorm:"primarykey"`
+    CreatedAt time.Time
+    UpdatedAt time.Time
+    DeletedAt gorm.DeletedAt `gorm:"index"`
+}
+
+type User struct {
+    gorm.Model    // embedded — fields are promoted into users table
+    Name  string
+    Email string
+}
+```
+
+The resulting `users` table has columns: `id`, `created_at`, `updated_at`, `deleted_at`, `name`, `email`.
+
+## Creating custom base models
+
+Define your own base struct to share a consistent set of fields across models:
+
+```go
+type BaseModel struct {
+    ID        uuid.UUID `gorm:"type:uuid;primaryKey"`
+    CreatedAt time.Time
+    UpdatedAt time.Time
+    CreatedBy string    `gorm:"size:100"`
+    UpdatedBy string    `gorm:"size:100"`
+}
+
+type Post struct {
+    BaseModel
+    Title   string `gorm:"size:255;not null"`
+    Content string `gorm:"type:text"`
+}
+
+type Comment struct {
+    BaseModel
+    PostID  uint
+    Content string `gorm:"type:text"`
+}
+```
+
+`Post` maps to a `posts` table with columns: `id`, `created_at`, `updated_at`, `created_by`, `updated_by`, `title`, `content`.
+
+## Anonymous vs named embedding
+
+Anonymous (unnamed) struct embedding is detected automatically by GORM. Named struct fields require an explicit `embedded` tag:
+
+<CodeGroup>
+
+```go anonymous embedding (automatic)
+// gorm.Model is embedded anonymously — GORM handles it automatically
+type User struct {
+    gorm.Model
+    Name string
+}
+```
+
+```go named field with embedded tag
+// A named field needs the embedded tag
+type Address struct {
+    Street string
+    City   string
+    Zip    string `gorm:"size:10"`
+}
+
+type User struct {
+    ID      uint
+    Name    string
+    Address Address `gorm:"embedded"`
+}
+// Columns: id, name, street, city, zip
+```
+
+</CodeGroup>
+
+GORM's embedding logic in `schema/field.go`:
+
+```go
+// Anonymous fields, or fields with the EMBEDDED tag, are flattened
+if _, ok := field.TagSettings["EMBEDDED"]; ok || (fieldStruct.Anonymous && ...) {
+    // fields from the embedded schema are promoted into the parent schema
+    for _, ef := range field.EmbeddedSchema.Fields {
+        ef.Schema = schema
+        // ...
+    }
+}
+```
+
+## The embeddedPrefix tag
+
+When embedding a struct that shares field names with the parent, use `embeddedPrefix` to namespace the embedded columns:
+
+```go
+type Address struct {
+    Street string
+    City   string
+    Zip    string
+}
+
+type User struct {
+    ID              uint
+    Name            string
+    HomeAddress     Address `gorm:"embedded;embeddedPrefix:home_"`
+    WorkAddress     Address `gorm:"embedded;embeddedPrefix:work_"`
+}
+```
+
+Resulting columns:
+
+| Field                      | Column             |
+|----------------------------|--------------------|
+| `HomeAddress.Street`       | `home_street`      |
+| `HomeAddress.City`         | `home_city`        |
+| `HomeAddress.Zip`          | `home_zip`         |
+| `WorkAddress.Street`       | `work_street`      |
+| `WorkAddress.City`         | `work_city`        |
+| `WorkAddress.Zip`          | `work_zip`         |
+
+The prefix is applied in `schema/field.go`:
+
+```go
+if prefix, ok := field.TagSettings["EMBEDDEDPREFIX"]; ok && ef.DBName != "" {
+    ef.DBName = prefix + ef.DBName
+}
+```
+
+## Sharing fields without table inheritance
+
+All embedded fields land in the same table as the parent model. There is no concept of a separate base table. This differs from OOP-style inheritance — embedding is purely a column-sharing mechanism.
+
+```go
+type Auditable struct {
+    CreatedBy string    `gorm:"size:100;not null"`
+    UpdatedBy string    `gorm:"size:100;not null"`
+    CreatedAt time.Time
+    UpdatedAt time.Time
+}
+
+type Invoice struct {
+    ID        uint   `gorm:"primaryKey"`
+    Number    string `gorm:"size:50;uniqueIndex"`
+    Amount    float64
+    Auditable        // embedded anonymously
+}
+
+type Payment struct {
+    ID        uint   `gorm:"primaryKey"`
+    InvoiceID uint
+    Amount    float64
+    Auditable        // same struct, different table
+}
+```
+
+`Invoice` → `invoices` table, `Payment` → `payments` table. Both tables independently contain `created_by`, `updated_by`, `created_at`, and `updated_at` columns.
+
+<Note>
+Because embedding copies field definitions into each model's table, changes to the shared struct are reflected across all models that embed it after the next migration.
+</Note>
+
+## Inline structs for grouping related fields
+
+Embedding also works as an organizational tool to group related fields without extracting them into a reusable type:
+
+```go
+type Dimensions struct {
+    Width  float64 `gorm:"not null"`
+    Height float64 `gorm:"not null"`
+    Depth  float64 `gorm:"not null"`
+}
+
+type Shipping struct {
+    Weight float64 `gorm:"not null"`
+    Unit   string  `gorm:"size:10;default:kg"`
+}
+
+type Product struct {
+    ID         uint   `gorm:"primaryKey"`
+    Name       string `gorm:"size:200;not null"`
+    Dimensions Dimensions `gorm:"embedded;embeddedPrefix:dim_"`
+    Shipping   Shipping   `gorm:"embedded;embeddedPrefix:ship_"`
+}
+```
+
+Resulting columns: `id`, `name`, `dim_width`, `dim_height`, `dim_depth`, `ship_weight`, `ship_unit`.
+
+## Primary key behavior in embedded structs
+
+When a struct with a primary key field is embedded, the primary key tag is only honored when the field is explicitly tagged with `primaryKey` in the embedded struct itself. GORM's parsing logic resets the primary key flag for embedded fields that do not carry the tag:
+
+```go
+// From schema/field.go
+if ef.PrimaryKey {
+    if !utils.CheckTruth(ef.TagSettings["PRIMARYKEY"], ef.TagSettings["PRIMARY_KEY"]) {
+        ef.PrimaryKey = false
+        // ...
+    }
+}
+```
+
+This prevents accidentally inheriting primary key behavior from an embedded struct.
+
+<Warning>
+Embedding two structs that both define an `ID` field will cause a conflict. GORM resolves this by prioritizing the field with the shortest bind path (i.e., the one closest to the top-level struct).
+</Warning>

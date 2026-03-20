@@ -1,0 +1,304 @@
+---
+title: "Logger"
+description: "Configure GORM's built-in logger, adjust log levels, suppress slow query warnings, and implement a custom logger."
+---
+
+GORM includes a built-in structured logger that records SQL statements, execution time, row counts, and slow query warnings. You can configure it, silence it, or replace it entirely with your own implementation.
+
+## Log levels
+
+Four log levels are defined as `logger.LogLevel` constants:
+
+| Level | Constant | Behavior |
+|---|---|---|
+| 1 | `logger.Silent` | All logging suppressed |
+| 2 | `logger.Error` | Only errors logged |
+| 3 | `logger.Warn` | Errors and slow query warnings logged |
+| 4 | `logger.Info` | Every SQL statement logged |
+
+Levels are ordered: `Silent < Error < Warn < Info`. Anything at or below the configured level is printed.
+
+## Default logger
+
+When you do not supply a logger in `gorm.Config`, GORM uses `logger.Default`:
+
+```go
+// Defined in gorm.io/gorm/logger
+var Default = New(
+    log.New(os.Stdout, "\r\n", log.LstdFlags),
+    Config{
+        SlowThreshold:             200 * time.Millisecond,
+        LogLevel:                  Warn,
+        IgnoreRecordNotFoundError: false,
+        Colorful:                  true,
+    },
+)
+```
+
+The default logger writes to `os.Stdout` with ANSI color codes enabled and warns on queries that take longer than 200ms.
+
+A second built-in logger, `logger.Discard`, silently drops all log output:
+
+```go
+var Discard = New(log.New(io.Discard, "", log.LstdFlags), Config{})
+```
+
+## Changing the log level
+
+Call `LogMode` to get a new logger instance at a different level. The original logger is not modified.
+
+```go
+import (
+    "gorm.io/gorm"
+    "gorm.io/gorm/logger"
+    "gorm.io/driver/postgres"
+)
+
+// Silence all logging
+db, err := gorm.Open(postgres.Open(dsn), &gorm.Config{
+    Logger: logger.Default.LogMode(logger.Silent),
+})
+
+// Log every SQL statement
+db, err := gorm.Open(postgres.Open(dsn), &gorm.Config{
+    Logger: logger.Default.LogMode(logger.Info),
+})
+```
+
+## Debug shorthand
+
+`db.Debug()` creates a new session with `Info`-level logging enabled for the current statement chain. It does not change the global logger.
+
+```go
+// Only this query is logged at Info level
+db.Debug().Find(&users)
+
+// Equivalent to:
+tx := db.Session(&gorm.Session{
+    Logger: db.Logger.LogMode(logger.Info),
+})
+tx.Find(&users)
+```
+
+## Customizing the default logger
+
+Create a new logger with `logger.New`, supplying your own `Writer` and `Config`:
+
+```go
+import (
+    "log"
+    "os"
+    "time"
+    "gorm.io/gorm/logger"
+)
+
+newLogger := logger.New(
+    log.New(os.Stdout, "\r\n", log.LstdFlags), // writer
+    logger.Config{
+        SlowThreshold:             500 * time.Millisecond, // warn when query > 500ms
+        LogLevel:                  logger.Info,            // log all SQL
+        IgnoreRecordNotFoundError: true,                   // suppress not-found errors
+        ParameterizedQueries:      false,                  // include parameter values
+        Colorful:                  false,                  // disable ANSI colors
+    },
+)
+
+db, err := gorm.Open(dialector, &gorm.Config{
+    Logger: newLogger,
+})
+```
+
+### Logger config fields
+
+<ParamField path="SlowThreshold" type="time.Duration" default="200ms">
+  Queries that exceed this duration are logged at `Warn` level with a `SLOW SQL` prefix. Set to `0` to disable slow query detection.
+</ParamField>
+
+<ParamField path="LogLevel" type="logger.LogLevel" default="logger.Warn">
+  The minimum severity level that is emitted. One of `Silent`, `Error`, `Warn`, or `Info`.
+</ParamField>
+
+<ParamField path="IgnoreRecordNotFoundError" type="bool" default="false">
+  When `true`, `gorm.ErrRecordNotFound` is not logged as an error. Useful in applications where a missing record is an expected, non-exceptional condition.
+</ParamField>
+
+<ParamField path="ParameterizedQueries" type="bool" default="false">
+  When `true`, bind parameters are not interpolated into the logged SQL. The logged statement uses `?` placeholders instead, which prevents sensitive values from appearing in logs.
+
+  ```go
+  // With ParameterizedQueries: false (default)
+  // Logs: SELECT * FROM users WHERE id = 42
+
+  // With ParameterizedQueries: true
+  // Logs: SELECT * FROM users WHERE id = ?
+  ```
+</ParamField>
+
+<ParamField path="Colorful" type="bool" default="true">
+  When `true`, ANSI escape codes are added to colorize log output. Disable when writing to a file or a structured log aggregator that does not render terminal colors.
+</ParamField>
+
+## Logger interface
+
+Any type implementing `logger.Interface` can be used as a GORM logger:
+
+```go
+type Interface interface {
+    // LogMode returns a new logger instance at the given level
+    LogMode(LogLevel) Interface
+
+    // Info logs an informational message
+    Info(context.Context, string, ...interface{})
+
+    // Warn logs a warning message
+    Warn(context.Context, string, ...interface{})
+
+    // Error logs an error message
+    Error(context.Context, string, ...interface{})
+
+    // Trace logs a SQL statement with elapsed time and affected row count.
+    // fc is called lazily to build the SQL string and row count only if the
+    // log level requires it.
+    Trace(ctx context.Context, begin time.Time, fc func() (sql string, rowsAffected int64), err error)
+}
+```
+
+<Note>
+  The `Trace` method receives a lazy function `fc` rather than the SQL string directly. Call `fc()` only when you intend to log the statement to avoid unnecessary string formatting.
+</Note>
+
+## Implementing a custom logger
+
+The example below routes all GORM log output to a `zerolog` instance:
+
+```go
+import (
+    "context"
+    "time"
+    "github.com/rs/zerolog"
+    "gorm.io/gorm/logger"
+)
+
+type zerologGORMLogger struct {
+    zl    zerolog.Logger
+    level logger.LogLevel
+    slowThreshold time.Duration
+}
+
+func (l *zerologGORMLogger) LogMode(level logger.LogLevel) logger.Interface {
+    copy := *l
+    copy.level = level
+    return &copy
+}
+
+func (l *zerologGORMLogger) Info(ctx context.Context, msg string, data ...interface{}) {
+    if l.level >= logger.Info {
+        l.zl.Info().Msgf(msg, data...)
+    }
+}
+
+func (l *zerologGORMLogger) Warn(ctx context.Context, msg string, data ...interface{}) {
+    if l.level >= logger.Warn {
+        l.zl.Warn().Msgf(msg, data...)
+    }
+}
+
+func (l *zerologGORMLogger) Error(ctx context.Context, msg string, data ...interface{}) {
+    if l.level >= logger.Error {
+        l.zl.Error().Msgf(msg, data...)
+    }
+}
+
+func (l *zerologGORMLogger) Trace(ctx context.Context, begin time.Time, fc func() (string, int64), err error) {
+    if l.level <= logger.Silent {
+        return
+    }
+    sql, rows := fc()
+    elapsed := time.Since(begin)
+    event := l.zl.Debug().
+        Str("sql", sql).
+        Int64("rows", rows).
+        Dur("elapsed", elapsed)
+    if err != nil {
+        event = l.zl.Error().Err(err).Str("sql", sql)
+    } else if l.slowThreshold != 0 && elapsed > l.slowThreshold {
+        event = l.zl.Warn().Str("sql", sql).Dur("elapsed", elapsed)
+    }
+    event.Send()
+}
+```
+
+Register it when opening the database:
+
+```go
+db, err := gorm.Open(dialector, &gorm.Config{
+    Logger: &zerologGORMLogger{
+        zl:            zerolog.New(os.Stderr),
+        level:         logger.Info,
+        slowThreshold: 500 * time.Millisecond,
+    },
+})
+```
+
+Or scope it to a single session:
+
+```go
+tx := db.Session(&gorm.Session{
+    Logger: &zerologGORMLogger{...},
+})
+```
+
+## slog integration
+
+For Go 1.21 and later, GORM ships a `logger.NewSlogLogger` constructor that wraps `*slog.Logger`:
+
+```go
+import (
+    "log/slog"
+    "os"
+    "time"
+    "gorm.io/gorm"
+    "gorm.io/gorm/logger"
+)
+
+slogger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
+
+gormLogger := logger.NewSlogLogger(slogger, logger.Config{
+    SlowThreshold:             200 * time.Millisecond,
+    LogLevel:                  logger.Info,
+    IgnoreRecordNotFoundError: true,
+    ParameterizedQueries:      false,
+})
+
+db, err := gorm.Open(dialector, &gorm.Config{
+    Logger: gormLogger,
+})
+```
+
+SQL trace events are logged as structured records with the following fields:
+
+| Field | Type | Description |
+|---|---|---|
+| `trace.duration` | string | Elapsed time in milliseconds (`"1.234ms"`) |
+| `trace.sql` | string | The SQL statement |
+| `trace.rows` | int64 | Number of rows affected (omitted when `-1`) |
+| `trace.error` | string | Error message, only present on error events |
+
+Example JSON output:
+
+```json
+{
+  "time": "2024-01-15T10:00:00Z",
+  "level": "INFO",
+  "msg": "SQL executed",
+  "trace": {
+    "duration": "0.843ms",
+    "sql": "SELECT * FROM users WHERE id = 42",
+    "rows": 1
+  }
+}
+```
+
+<Note>
+  The `Colorful` field in `Config` has no effect when using `NewSlogLogger`. Structured log handlers manage their own output formatting.
+</Note>

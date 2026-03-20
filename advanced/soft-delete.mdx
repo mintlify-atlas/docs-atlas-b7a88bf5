@@ -1,0 +1,142 @@
+---
+title: Soft delete
+description: Mark records as deleted without removing them from the database, and query or permanently delete them when needed.
+---
+
+Soft delete lets you "delete" records by setting a timestamp rather than removing the row. Soft-deleted records are excluded from normal queries and can be recovered or permanently removed later.
+
+## How soft delete works
+
+When your model embeds `gorm.Model` or includes a `gorm.DeletedAt` field, GORM automatically enables soft delete for that model.
+
+```go
+type User struct {
+    gorm.Model       // includes ID, CreatedAt, UpdatedAt, DeletedAt
+    Name  string
+    Email string
+}
+
+// gorm.Model expands to:
+type Model struct {
+    ID        uint `gorm:"primarykey"`
+    CreatedAt time.Time
+    UpdatedAt time.Time
+    DeletedAt gorm.DeletedAt `gorm:"index"`
+}
+```
+
+The `gorm.DeletedAt` type implements `QueryClauses`, `UpdateClauses`, and `DeleteClauses` interfaces. GORM uses these to intercept operations automatically:
+
+- **Delete** — sets `deleted_at` to the current time instead of issuing `DELETE`.
+- **Find / First / Last** — adds `WHERE deleted_at IS NULL` automatically.
+- **Update** — also adds `WHERE deleted_at IS NULL` to avoid updating soft-deleted rows.
+
+## Soft deleting a record
+
+```go
+// Sets deleted_at to now — does NOT remove the row
+db.Delete(&user)
+// UPDATE users SET deleted_at = '2024-01-15 10:00:00' WHERE id = 1
+
+// Delete with a condition
+db.Where("age < ?", 18).Delete(&User{})
+// UPDATE users SET deleted_at = '...' WHERE age < 18 AND deleted_at IS NULL
+```
+
+## Querying soft-deleted records
+
+Normal queries exclude soft-deleted records:
+
+```go
+var users []User
+db.Find(&users)
+// SELECT * FROM users WHERE deleted_at IS NULL
+```
+
+Use `db.Unscoped()` to include soft-deleted records:
+
+```go
+var allUsers []User
+db.Unscoped().Find(&allUsers)
+// SELECT * FROM users
+
+var deletedUsers []User
+db.Unscoped().Where("deleted_at IS NOT NULL").Find(&deletedUsers)
+```
+
+## Permanently deleting a record
+
+Chain `Unscoped()` before `Delete` to issue a real `DELETE` statement:
+
+```go
+db.Unscoped().Delete(&user)
+// DELETE FROM users WHERE id = 1
+```
+
+## Restoring a soft-deleted record
+
+Set `deleted_at` back to `NULL` using an update:
+
+```go
+db.Unscoped().Model(&user).Update("deleted_at", nil)
+// UPDATE users SET deleted_at = NULL WHERE id = 1
+```
+
+## Custom DeletedAt field name
+
+GORM identifies the soft-delete field by its type (`gorm.DeletedAt`). You can rename the column using a struct tag:
+
+```go
+type User struct {
+    ID        uint
+    Name      string
+    RemovedAt gorm.DeletedAt `gorm:"column:removed_at;index"`
+}
+```
+
+## Soft delete with a zero-value timestamp
+
+Some databases have trouble indexing `NULL` efficiently. You can configure GORM to use a zero time value instead of `NULL` via the `softDeleteZeroValueUnixSecond` tag. For flag-based soft delete, implement the `SoftDeleteDeleteClause` interface on a custom type.
+
+```go
+import "gorm.io/plugin/soft_delete"
+
+type User struct {
+    ID        uint
+    Name      string
+    DeletedAt soft_delete.DeletedAt
+}
+```
+
+<Note>
+The `gorm.io/plugin/soft_delete` package provides additional soft-delete strategies including Unix-second timestamps and boolean flags.
+</Note>
+
+## Indexes on DeletedAt
+
+Add an index on `deleted_at` to keep queries fast on large tables. `gorm.Model` already includes `gorm:"index"` on `DeletedAt`.
+
+```go
+type Article struct {
+    ID        uint
+    Title     string
+    DeletedAt gorm.DeletedAt `gorm:"index"` // composite index recommended on high-volume tables
+}
+```
+
+For composite indexes that include `deleted_at` alongside frequently filtered columns:
+
+```go
+type Article struct {
+    ID        uint
+    AuthorID  uint
+    Title     string
+    DeletedAt gorm.DeletedAt `gorm:"index:idx_author_deleted,composite:deleted"`
+    // pair with:
+    // AuthorID uint `gorm:"index:idx_author_deleted,composite:author"`
+}
+```
+
+<Tip>
+For tables with millions of rows, a partial index (e.g., `WHERE deleted_at IS NULL`) dramatically reduces index size. Create it manually with `db.Exec` since GORM's tag system does not support partial index conditions directly.
+</Tip>

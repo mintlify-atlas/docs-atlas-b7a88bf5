@@ -1,0 +1,489 @@
+---
+title: 'Finisher methods'
+description: 'Methods that execute SQL immediately and return a result. Each finisher triggers the GORM callback pipeline for its operation type.'
+---
+
+Finisher methods execute the accumulated statement, triggering the relevant GORM callback chain (create, query, update, delete, or raw). They always return a `*DB` (or a Go value for `Row`, `Rows`, `ScanRows`, `Connection`, and `Transaction`), and errors are stored on `db.Error`.
+
+```go
+result := db.Where("age > ?", 18).Find(&users)
+if result.Error != nil {
+    // handle error
+}
+fmt.Println(result.RowsAffected)
+```
+
+## Create
+
+```go
+func (db *DB) Create(value interface{}) (tx *DB)
+```
+
+Inserts `value` into the database and populates the primary key field on the struct. If `Config.CreateBatchSize` is set and `value` is a slice, delegates to `CreateInBatches` automatically.
+
+```go
+user := User{Name: "jinzhu", Age: 18}
+result := db.Create(&user)
+// user.ID is now populated
+// result.Error contains any error
+// result.RowsAffected == 1
+```
+
+<Warning>
+  Always pass a pointer to `Create`. Passing a value (non-pointer) will not update the primary key field.
+</Warning>
+
+## CreateInBatches
+
+```go
+func (db *DB) CreateInBatches(value interface{}, batchSize int) (tx *DB)
+```
+
+Inserts a slice of records in chunks of `batchSize`. Each chunk is wrapped in a transaction (unless `SkipDefaultTransaction` is set or the whole slice fits in one batch).
+
+```go
+var users = []User{{Name: "user1"}, {Name: "user2"}, {Name: "user3"}}
+db.CreateInBatches(&users, 100)
+```
+
+## Save
+
+```go
+func (db *DB) Save(value interface{}) (tx *DB)
+```
+
+Updates all fields of a record if it has a non-zero primary key, otherwise inserts it. Unlike `Updates`, `Save` includes zero-value fields. For slices, performs an upsert with `ON CONFLICT UpdateAll`.
+
+```go
+// Insert (ID is zero)
+db.Save(&User{Name: "jinzhu", Age: 18})
+
+// Update all fields (ID is non-zero)
+db.Save(&User{ID: 1, Name: "jinzhu", Age: 100})
+```
+
+<Warning>
+  `Save` with a struct that has a non-zero primary key will update **all** columns, including zero-value ones. Use `Updates` to update only specific fields.
+</Warning>
+
+## First
+
+```go
+func (db *DB) First(dest interface{}, conds ...interface{}) (tx *DB)
+```
+
+Retrieves the first record ordered by the primary key ascending. Sets `ErrRecordNotFound` on `db.Error` if no record matches.
+
+```go
+// Primary key lookup
+db.First(&user, 10)
+// SELECT * FROM users WHERE id = 10 ORDER BY id LIMIT 1
+
+// With condition
+db.First(&user, "name = ?", "jinzhu")
+```
+
+## Take
+
+```go
+func (db *DB) Take(dest interface{}, conds ...interface{}) (tx *DB)
+```
+
+Retrieves one record with no specified ordering (database-engine dependent). Sets `ErrRecordNotFound` if no match.
+
+```go
+db.Take(&user)
+// SELECT * FROM users LIMIT 1
+
+db.Take(&user, "name = ?", "jinzhu")
+```
+
+<Note>
+  Use `First` when you need deterministic ordering by primary key. Use `Take` when ordering does not matter and you want to avoid the `ORDER BY` cost.
+</Note>
+
+## Last
+
+```go
+func (db *DB) Last(dest interface{}, conds ...interface{}) (tx *DB)
+```
+
+Retrieves the last record ordered by the primary key descending. Sets `ErrRecordNotFound` if no match.
+
+```go
+db.Last(&user)
+// SELECT * FROM users ORDER BY id DESC LIMIT 1
+```
+
+## Find
+
+```go
+func (db *DB) Find(dest interface{}, conds ...interface{}) (tx *DB)
+```
+
+Retrieves all records matching the conditions. Scans into a slice or a single struct. Does **not** return `ErrRecordNotFound` when the result set is empty.
+
+```go
+// All users
+db.Find(&users)
+
+// With inline condition
+db.Find(&users, "name <> ? AND age > ?", "jinzhu", 18)
+
+// Into a map slice
+var results []map[string]interface{}
+db.Model(&User{}).Find(&results)
+```
+
+## FindInBatches
+
+```go
+func (db *DB) FindInBatches(dest interface{}, batchSize int, fc func(tx *DB, batch int) error) *DB
+```
+
+Queries records in successive batches of `batchSize`, calling `fc` for each batch. Results are ordered by primary key; each subsequent batch starts after the last primary key of the previous batch. Stops when `fc` returns an error or fewer than `batchSize` records are returned.
+
+```go
+db.Where("age > ?", 18).FindInBatches(&users, 100, func(tx *gorm.DB, batch int) error {
+    for i := range users {
+        // process users[i]
+    }
+    return nil // return an error to stop
+})
+```
+
+## FirstOrInit
+
+```go
+func (db *DB) FirstOrInit(dest interface{}, conds ...interface{}) (tx *DB)
+```
+
+Finds the first record matching the conditions. If not found, initialises `dest` with the condition values plus any `Attrs` values (but does **not** insert into the database). `Assign` values are always applied regardless.
+
+```go
+// Initialise if not found — does not create
+db.FirstOrInit(&user, User{Name: "non_existing"})
+
+db.Where(User{Name: "non_existing"}).
+    Attrs(User{Email: "fake@fake.org"}).
+    FirstOrInit(&user)
+// user.Email == "fake@fake.org" only if the user was not found
+```
+
+## FirstOrCreate
+
+```go
+func (db *DB) FirstOrCreate(dest interface{}, conds ...interface{}) (tx *DB)
+```
+
+Finds the first record matching the conditions, or creates it if it does not exist. `Assign` values are always applied and will trigger an `Updates` call even if the record was found.
+
+```go
+// Get or create
+db.FirstOrCreate(&user, User{Name: "non_existing"})
+
+// With Assign — updates record even if found
+db.Where(User{Name: "jinzhu"}).
+    Assign(User{Age: 20}).
+    FirstOrCreate(&user)
+```
+
+## Update
+
+```go
+func (db *DB) Update(column string, value interface{}) (tx *DB)
+```
+
+Updates a single column. Runs through the update callbacks. Requires a model with a primary key or a `Where` clause.
+
+```go
+// Update one column — requires Model or Where condition
+db.Model(&user).Update("name", "hello")
+
+// With raw SQL expression
+db.Model(&product).Update("price", gorm.Expr("price * ? + ?", 0.9, 10))
+```
+
+## Updates
+
+```go
+func (db *DB) Updates(values interface{}) (tx *DB)
+```
+
+Updates multiple columns from a struct or map. When a struct is provided, only non-zero fields are updated. Runs through the update callbacks.
+
+```go
+// Struct — only non-zero fields are updated
+db.Model(&user).Updates(User{Name: "hello", Age: 18})
+
+// Map — all keys are updated, including zero values
+db.Model(&user).Updates(map[string]interface{}{"name": "hello", "age": 0})
+```
+
+## UpdateColumn
+
+```go
+func (db *DB) UpdateColumn(column string, value interface{}) (tx *DB)
+```
+
+Updates a single column without running hooks or updating the `UpdatedAt` timestamp.
+
+```go
+db.Model(&user).UpdateColumn("name", "hello")
+```
+
+## UpdateColumns
+
+```go
+func (db *DB) UpdateColumns(values interface{}) (tx *DB)
+```
+
+Updates multiple columns without running hooks or updating the `UpdatedAt` timestamp. Accepts a struct or map.
+
+```go
+db.Model(&user).UpdateColumns(User{Name: "hello", Age: 18})
+db.Model(&user).UpdateColumns(map[string]interface{}{"name": "hello", "age": 0})
+```
+
+## Delete
+
+```go
+func (db *DB) Delete(value interface{}, conds ...interface{}) (tx *DB)
+```
+
+Deletes records matching `value` and any optional `conds`. If the model has a `DeletedAt` field, performs a soft delete by setting the current timestamp. Use `Unscoped().Delete` for hard deletion.
+
+```go
+// Delete by primary key in struct
+db.Delete(&user)
+
+// Delete with condition
+db.Delete(&User{}, "name = ?", "jinzhu")
+
+// Hard delete a soft-deleted record
+db.Unscoped().Delete(&user)
+```
+
+<Warning>
+  Without a model primary key or a `Where` clause, GORM returns `ErrMissingWhereClause` (unless `AllowGlobalUpdate` is set) to prevent accidental table wipes.
+</Warning>
+
+## Count
+
+```go
+func (db *DB) Count(count *int64) (tx *DB)
+```
+
+Counts the records matching the current conditions. The result is stored in the `*int64` pointed to by `count`.
+
+```go
+var count int64
+db.Model(&User{}).Where("name = ?", "jinzhu").Count(&count)
+
+// DISTINCT count
+db.Model(&User{}).Distinct("name").Count(&count)
+```
+
+## Row
+
+```go
+func (db *DB) Row() *sql.Row
+```
+
+Executes the query and returns a single `*sql.Row` for manual scanning. Use with `Raw` for arbitrary SQL.
+
+```go
+row := db.Raw("SELECT name FROM users WHERE id = ?", 1).Row()
+var name string
+row.Scan(&name)
+```
+
+## Rows
+
+```go
+func (db *DB) Rows() (*sql.Rows, error)
+```
+
+Executes the query and returns a `*sql.Rows` cursor. You are responsible for closing the rows.
+
+```go
+rows, err := db.Model(&User{}).Where("name = ?", "jinzhu").Rows()
+if err != nil {
+    return err
+}
+defer rows.Close()
+
+for rows.Next() {
+    var user User
+    db.ScanRows(rows, &user)
+}
+```
+
+## Scan
+
+```go
+func (db *DB) Scan(dest interface{}) (tx *DB)
+```
+
+Scans the result of the current statement into `dest`. Similar to `Find`, but does not perform any model-based table name inference — useful after `Raw` or `Table`.
+
+```go
+type Result struct { Name string; Age int }
+var result Result
+db.Raw("SELECT name, age FROM users WHERE id = ?", 1).Scan(&result)
+
+var results []Result
+db.Table("users").Select("name, age").Scan(&results)
+```
+
+## Pluck
+
+```go
+func (db *DB) Pluck(column string, dest interface{}) (tx *DB)
+```
+
+Queries a single column and scans the values into a slice.
+
+```go
+var names []string
+db.Model(&User{}).Pluck("name", &names)
+
+var ages []int64
+db.Model(&User{}).Pluck("age", &ages)
+```
+
+## ScanRows
+
+```go
+func (db *DB) ScanRows(rows *sql.Rows, dest interface{}) error
+```
+
+Scans a single row from an existing `*sql.Rows` cursor into `dest`. Typically used inside a `Rows()` loop.
+
+```go
+rows, _ := db.Model(&User{}).Rows()
+defer rows.Close()
+for rows.Next() {
+    var user User
+    db.ScanRows(rows, &user)
+    // process user
+}
+```
+
+## Connection
+
+```go
+func (db *DB) Connection(fc func(tx *DB) error) (err error)
+```
+
+Acquires a dedicated connection from the pool, runs `fc` with that connection, and returns the connection to the pool when `fc` returns. Useful when you need a series of statements to execute on the same connection (e.g., for session-level settings).
+
+```go
+db.Connection(func(tx *gorm.DB) error {
+    tx.Exec("SET time_zone = '+08:00'")
+    return tx.Find(&users).Error
+})
+```
+
+## Transaction
+
+```go
+func (db *DB) Transaction(fc func(tx *DB) error, opts ...*sql.TxOptions) (err error)
+```
+
+Executes `fc` within a transaction. If `fc` returns an error, the transaction is rolled back; otherwise it is committed. Panics in `fc` also trigger a rollback. Supports nested transactions via savepoints (unless `DisableNestedTransaction` is set).
+
+```go
+err := db.Transaction(func(tx *gorm.DB) error {
+    if err := tx.Create(&user).Error; err != nil {
+        return err // triggers rollback
+    }
+    if err := tx.Create(&product).Error; err != nil {
+        return err
+    }
+    return nil // commit
+})
+```
+
+## Begin
+
+```go
+func (db *DB) Begin(opts ...*sql.TxOptions) *DB
+```
+
+Starts a transaction manually and returns a new `*DB` operating within that transaction. You must call `Commit` or `Rollback` yourself. Prefer `Transaction` for automatic management.
+
+```go
+tx := db.Begin()
+if tx.Error != nil {
+    return tx.Error
+}
+
+if err := tx.Create(&user).Error; err != nil {
+    tx.Rollback()
+    return err
+}
+
+tx.Commit()
+```
+
+## Commit
+
+```go
+func (db *DB) Commit() *DB
+```
+
+Commits the current transaction. Returns `ErrInvalidTransaction` if called outside a transaction.
+
+## Rollback
+
+```go
+func (db *DB) Rollback() *DB
+```
+
+Rolls back the current transaction. Returns `ErrInvalidTransaction` if called outside a transaction.
+
+## SavePoint
+
+```go
+func (db *DB) SavePoint(name string) *DB
+```
+
+Creates a named savepoint within the current transaction. Requires the dialector to implement `SavePointerDialectorInterface`. Returns `ErrUnsupportedDriver` if not supported.
+
+```go
+tx := db.Begin()
+tx.Create(&user)
+tx.SavePoint("sp1")
+tx.Create(&product) // if this fails:
+tx.RollbackTo("sp1") // rolls back to before product creation
+tx.Commit()
+```
+
+## RollbackTo
+
+```go
+func (db *DB) RollbackTo(name string) *DB
+```
+
+Rolls back the current transaction to a previously created savepoint. Requires the dialector to implement `SavePointerDialectorInterface`.
+
+## Exec
+
+```go
+func (db *DB) Exec(sql string, values ...interface{}) (tx *DB)
+```
+
+Executes a raw SQL statement (DDL or DML) without scanning any results. Supports `?` positional and `@name` named placeholders.
+
+```go
+// DML
+db.Exec("UPDATE orders SET shipped_at = ? WHERE id IN ?", time.Now(), []int{1, 2, 3})
+
+// DDL
+db.Exec("CREATE INDEX idx_name ON users(name)")
+
+// Named placeholder
+db.Exec("UPDATE users SET name = @name WHERE id = @id",
+    sql.Named("name", "jinzhu"), sql.Named("id", 1))
+```

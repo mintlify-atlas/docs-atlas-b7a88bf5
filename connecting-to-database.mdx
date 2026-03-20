@@ -1,0 +1,332 @@
+---
+title: "Connecting to a database"
+description: "Connect GORM to MySQL, PostgreSQL, SQLite, and SQL Server. Configure DSNs, connection pool settings, and initialization options."
+---
+
+GORM uses a **dialector** to abstract database-specific behavior. Install the driver package for your database, then pass the dialector to `gorm.Open` along with a `*gorm.Config`.
+
+```go
+func Open(dialector gorm.Dialector, opts ...gorm.Option) (*gorm.DB, error)
+```
+
+The returned `*gorm.DB` is safe for concurrent use. Create it once at application startup and share it across your codebase — do not open a new connection per request.
+
+## Supported databases
+
+<Tabs>
+
+<Tab title="MySQL">
+
+Install the driver:
+
+```bash
+go get -u gorm.io/driver/mysql
+```
+
+Connect using a DSN string:
+
+```go
+import (
+    "gorm.io/driver/mysql"
+    "gorm.io/gorm"
+)
+
+// DSN format:
+// user:password@tcp(host:port)/dbname?param=value
+dsn := "user:password@tcp(127.0.0.1:3306)/mydb?charset=utf8mb4&parseTime=True&loc=Local"
+
+db, err := gorm.Open(mysql.Open(dsn), &gorm.Config{})
+if err != nil {
+    panic("failed to connect to MySQL")
+}
+```
+
+**DSN parameters**
+
+| Parameter     | Recommended value | Description                                              |
+|---------------|-------------------|----------------------------------------------------------|
+| `charset`     | `utf8mb4`         | Full Unicode support including emoji                     |
+| `parseTime`   | `True`            | Scan `DATE` and `DATETIME` into `time.Time`              |
+| `loc`         | `Local`           | Use the server's local timezone for timestamp parsing    |
+
+You can also connect using an existing `*sql.DB`:
+
+```go
+import (
+    "database/sql"
+    "gorm.io/driver/mysql"
+    "gorm.io/gorm"
+)
+
+sqlDB, err := sql.Open("mysql", dsn)
+if err != nil {
+    panic(err)
+}
+
+db, err := gorm.Open(mysql.New(mysql.Config{
+    Conn: sqlDB,
+}), &gorm.Config{})
+```
+
+<Tip>
+Set `parseTime=True` in your DSN. Without it, GORM cannot scan MySQL `DATETIME` columns into `time.Time` fields, causing a runtime error.
+</Tip>
+
+</Tab>
+
+<Tab title="PostgreSQL">
+
+Install the driver:
+
+```bash
+go get -u gorm.io/driver/postgres
+```
+
+Connect using a DSN string or a keyword/value connection string:
+
+```go
+import (
+    "gorm.io/driver/postgres"
+    "gorm.io/gorm"
+)
+
+// DSN format (URL style)
+dsn := "host=localhost user=postgres password=secret dbname=mydb port=5432 sslmode=disable TimeZone=UTC"
+
+db, err := gorm.Open(postgres.Open(dsn), &gorm.Config{})
+if err != nil {
+    panic("failed to connect to PostgreSQL")
+}
+```
+
+**DSN parameters**
+
+| Parameter  | Example value | Description                                          |
+|------------|---------------|------------------------------------------------------|
+| `host`     | `localhost`   | Database server hostname or IP                       |
+| `user`     | `postgres`    | Database user                                        |
+| `password` | `secret`      | Database password                                    |
+| `dbname`   | `mydb`        | Database name                                        |
+| `port`     | `5432`        | Port (default 5432)                                  |
+| `sslmode`  | `disable`     | SSL mode: `disable`, `require`, `verify-full`, etc.  |
+| `TimeZone` | `UTC`         | Session timezone                                     |
+
+You can also configure the driver with a `postgres.Config` struct to control prepared statement caching:
+
+```go
+db, err := gorm.Open(postgres.New(postgres.Config{
+    DSN:                  dsn,
+    PreferSimpleProtocol: true, // disables implicit prepared statement usage
+}), &gorm.Config{})
+```
+
+</Tab>
+
+<Tab title="SQLite">
+
+Install the driver:
+
+```bash
+go get -u gorm.io/driver/sqlite
+```
+
+Connect using a file path or an in-memory database:
+
+```go
+import (
+    "gorm.io/driver/sqlite"
+    "gorm.io/gorm"
+)
+
+// File-based database
+db, err := gorm.Open(sqlite.Open("app.db"), &gorm.Config{})
+if err != nil {
+    panic("failed to open SQLite database")
+}
+
+// In-memory database (data is lost when the process exits)
+db, err = gorm.Open(sqlite.Open("file::memory:?cache=shared"), &gorm.Config{})
+```
+
+<Note>
+SQLite allows only one writer at a time. For concurrent write-heavy workloads, use PostgreSQL or MySQL. SQLite is well-suited for local development, CLI tools, and read-heavy embedded applications.
+</Note>
+
+<Warning>
+The `gorm.io/driver/sqlite` package uses CGO to link against the system SQLite library. If you need a pure Go build without CGO, use [gorm.io/driver/sqlite](https://github.com/glebarez/sqlite) (a CGO-free SQLite driver built on `modernc.org/sqlite`).
+</Warning>
+
+</Tab>
+
+<Tab title="SQL Server">
+
+Install the driver:
+
+```bash
+go get -u gorm.io/driver/sqlserver
+```
+
+Connect using a DSN in ADO-style or URL format:
+
+```go
+import (
+    "gorm.io/driver/sqlserver"
+    "gorm.io/gorm"
+)
+
+// ADO-style DSN
+dsn := "sqlserver://user:password@localhost:1433?database=mydb"
+
+db, err := gorm.Open(sqlserver.Open(dsn), &gorm.Config{})
+if err != nil {
+    panic("failed to connect to SQL Server")
+}
+```
+
+**DSN format**
+
+```
+sqlserver://[user[:password]@]host[:port][?param=value...]
+```
+
+| Parameter  | Example value | Description                          |
+|------------|---------------|--------------------------------------|
+| `database` | `mydb`        | Database name                        |
+| `encrypt`  | `disable`     | Encryption: `disable`, `false`, `true` |
+| `app name` | `my-app`      | Application name shown in SQL Server |
+
+</Tab>
+
+</Tabs>
+
+## Connection pool settings
+
+`gorm.Open` wraps the standard library's `database/sql` connection pool. You can access the underlying `*sql.DB` via `db.DB()` to configure pool behavior:
+
+```go
+import "time"
+
+sqlDB, err := db.DB()
+if err != nil {
+    panic(err)
+}
+
+// Maximum number of connections that can be open simultaneously
+sqlDB.SetMaxOpenConns(25)
+
+// Maximum number of idle connections kept in the pool
+sqlDB.SetMaxIdleConns(10)
+
+// Maximum time a connection can be reused before being closed
+sqlDB.SetConnMaxLifetime(time.Hour)
+
+// Maximum time a connection can sit idle before being closed
+sqlDB.SetConnMaxIdleTime(30 * time.Minute)
+```
+
+**Recommended starting values**
+
+| Setting              | Development | Production |
+|----------------------|-------------|------------|
+| `MaxOpenConns`       | 5           | 25–100     |
+| `MaxIdleConns`       | 2           | 10–25      |
+| `ConnMaxLifetime`    | 1h          | 1h         |
+| `ConnMaxIdleTime`    | 5m          | 30m        |
+
+<Tip>
+Set `MaxOpenConns` to a value your database can handle. Most managed PostgreSQL instances default to 100 total connections — leave headroom for monitoring, migrations, and admin tools.
+</Tip>
+
+## gorm.Config options
+
+Pass a `*gorm.Config` as the second argument to `gorm.Open` to control GORM's behavior at initialization time.
+
+```go
+db, err := gorm.Open(dialector, &gorm.Config{
+    // Skip the automatic ping on open (useful when the DB may not be available at startup)
+    DisableAutomaticPing: true,
+
+    // Cache prepared statements for reuse across queries
+    PrepareStmt: true,
+
+    // Skip wrapping single create/update/delete in a transaction (improves throughput)
+    SkipDefaultTransaction: true,
+
+    // Do not create foreign key constraints when running AutoMigrate
+    DisableForeignKeyConstraintWhenMigrating: true,
+})
+```
+
+**Config fields relevant to connection**
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `DisableAutomaticPing` | `bool` | Skip the ping that verifies the connection on `Open`. Useful for lazy-connect patterns. |
+| `PrepareStmt` | `bool` | Execute all queries as prepared statements and cache them. Reduces parse overhead for repeated queries. |
+| `PrepareStmtMaxSize` | `int` | Maximum number of cached prepared statements (LRU eviction). Defaults to `math.MaxInt64`. |
+| `PrepareStmtTTL` | `time.Duration` | TTL for cached prepared statements. Defaults to 1 hour. |
+| `SkipDefaultTransaction` | `bool` | Skip the implicit transaction around single create/update/delete operations. |
+| `DisableForeignKeyConstraintWhenMigrating` | `bool` | Do not emit `CONSTRAINT` clauses during `AutoMigrate`. Useful for databases with limited FK support. |
+| `NamingStrategy` | `schema.Namer` | Override the default table/column naming convention. |
+| `Logger` | `logger.Interface` | Set a custom logger. Defaults to `logger.Default` which prints to stdout. |
+| `NowFunc` | `func() time.Time` | Override the function used to generate current timestamps. |
+| `DryRun` | `bool` | Build SQL statements but do not execute them. Useful for inspecting generated queries. |
+| `CreateBatchSize` | `int` | Default batch size when `CreateInBatches` is called. |
+| `TranslateError` | `bool` | Translate database-specific errors into GORM errors (e.g. `ErrDuplicatedKey`). |
+
+## Verifying the connection
+
+After opening a connection, ping the database to confirm it is reachable:
+
+```go
+sqlDB, err := db.DB()
+if err != nil {
+    panic(err)
+}
+
+if err := sqlDB.Ping(); err != nil {
+    panic("database unreachable: " + err.Error())
+}
+```
+
+If you set `DisableAutomaticPing: true`, this is the correct place to check connectivity before your application starts serving traffic.
+
+## Using an existing sql.DB
+
+If you manage the `*sql.DB` yourself (for example, to share a connection pool across multiple ORMs or to apply custom TLS configuration), pass it to the dialector directly:
+
+```go
+import (
+    "database/sql"
+    "gorm.io/driver/postgres"
+    "gorm.io/gorm"
+)
+
+sqlDB, err := sql.Open("pgx", dsn)
+if err != nil {
+    panic(err)
+}
+
+db, err := gorm.Open(postgres.New(postgres.Config{
+    Conn: sqlDB,
+}), &gorm.Config{})
+```
+
+GORM will use the provided `*sql.DB` and will not create its own connection pool.
+
+## Next steps
+
+<Columns cols={2}>
+  <Card title="Declaring models" icon="table" href="/models/declaring-models">
+    Map Go structs to database tables with field tags, data types, and constraints.
+  </Card>
+  <Card title="Auto migrate" icon="rotate" href="/advanced/auto-migrate">
+    Automatically create and update your schema as your models evolve.
+  </Card>
+  <Card title="Configuration" icon="sliders" href="/configuration/config">
+    Full reference for all gorm.Config fields including logging and naming strategies.
+  </Card>
+  <Card title="CRUD operations" icon="pen-to-square" href="/crud/create">
+    Start creating, reading, updating, and deleting records.
+  </Card>
+</Columns>

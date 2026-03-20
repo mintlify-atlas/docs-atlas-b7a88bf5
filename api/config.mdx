@@ -1,0 +1,159 @@
+---
+title: 'Config'
+description: 'All configuration fields for the GORM Config struct, which controls database behaviour, naming, logging, and more.'
+---
+
+The `Config` struct is passed to `gorm.Open` to control GORM behaviour at the session level. It implements the `Option` interface, so you pass it directly as the second argument to `Open`.
+
+```go
+db, err := gorm.Open(dialector, &gorm.Config{
+    SkipDefaultTransaction: true,
+    NamingStrategy: schema.NamingStrategy{
+        TablePrefix:   "app_",
+        SingularTable: true,
+    },
+    Logger: logger.Default.LogMode(logger.Info),
+    PrepareStmt: true,
+})
+```
+
+## Transaction behaviour
+
+<ParamField path="SkipDefaultTransaction" type="bool" default="false">
+  When `true`, GORM does not wrap single create, update, and delete operations in an implicit transaction. Improves performance for workloads that do not need the extra safety.
+</ParamField>
+
+<ParamField path="DefaultTransactionTimeout" type="time.Duration" default="0">
+  If greater than zero, a context timeout is automatically applied to each transaction started with `Begin` (unless the context already has a deadline).
+</ParamField>
+
+<ParamField path="DefaultContextTimeout" type="time.Duration" default="0">
+  A default timeout duration applied to statement contexts when no explicit deadline is set.
+</ParamField>
+
+<ParamField path="DisableNestedTransaction" type="bool" default="false">
+  When `true`, calling `Transaction` inside an existing transaction does not create a savepoint. The inner `fc` executes directly on the outer transaction.
+</ParamField>
+
+<ParamField path="AllowGlobalUpdate" type="bool" default="false">
+  When `false` (the default), GORM returns `ErrMissingWhereClause` if you attempt an update or delete without any `WHERE` conditions. Set to `true` to allow global updates.
+</ParamField>
+
+## Naming strategy
+
+<ParamField path="NamingStrategy" type="schema.Namer">
+  Controls how Go struct and field names are converted to table and column names. The default implementation (`schema.NamingStrategy`) snake-cases names and pluralises table names. Common fields:
+
+  ```go
+  NamingStrategy: schema.NamingStrategy{
+      TablePrefix:   "t_",   // table name prefix
+      SingularTable: false,  // use singular table names
+      NoLowerCase:   false,  // disable lower case conversion
+      NameReplacer:  strings.NewReplacer("CID", "Cid"),
+  }
+  ```
+</ParamField>
+
+## Associations
+
+<ParamField path="FullSaveAssociations" type="bool" default="false">
+  When `true`, GORM performs a full upsert of all associations when saving a record (instead of only updating foreign keys). Useful when you want a single `Save` call to persist nested structs.
+</ParamField>
+
+<ParamField path="PropagateUnscoped" type="bool" default="false">
+  When `true`, the `Unscoped` flag is propagated to every nested statement, including preloads and association queries.
+</ParamField>
+
+## Logging
+
+<ParamField path="Logger" type="logger.Interface">
+  The logger implementation. Defaults to `logger.Default`, which writes to stdout. Use `logger.Default.LogMode(logger.Silent)` to suppress all output, or provide a custom implementation.
+
+  ```go
+  Logger: logger.New(
+      log.New(os.Stdout, "\r\n", log.LstdFlags),
+      logger.Config{
+          SlowThreshold:             200 * time.Millisecond,
+          LogLevel:                  logger.Warn,
+          IgnoreRecordNotFoundError: true,
+          Colorful:                  true,
+      },
+  )
+  ```
+</ParamField>
+
+<ParamField path="TranslateError" type="bool" default="false">
+  When `true`, database-specific errors returned by the dialector are translated to standard GORM errors such as `ErrDuplicatedKey`, `ErrForeignKeyViolated`, and `ErrCheckConstraintViolated`. The dialector must implement `ErrorTranslator`.
+</ParamField>
+
+## Time
+
+<ParamField path="NowFunc" type="func() time.Time">
+  The function GORM calls to obtain the current time when setting `CreatedAt`, `UpdatedAt`, or `DeletedAt` fields. Defaults to `time.Now().Local()`. Override to use UTC or a custom clock.
+
+  ```go
+  NowFunc: func() time.Time {
+      return time.Now().UTC()
+  }
+  ```
+</ParamField>
+
+## Statement preparation
+
+<ParamField path="DryRun" type="bool" default="false">
+  When `true`, GORM generates SQL but does not execute it. The generated SQL is available on `db.Statement.SQL`. Useful for inspection and testing.
+</ParamField>
+
+<ParamField path="PrepareStmt" type="bool" default="false">
+  When `true`, GORM caches prepared statements. Subsequent identical queries reuse the cached statement, reducing parsing overhead on the database server.
+</ParamField>
+
+<ParamField path="PrepareStmtMaxSize" type="int" default="0">
+  Maximum number of entries in the prepared statement LRU cache. A value of `0` uses the maximum `int64` value (effectively unlimited).
+</ParamField>
+
+<ParamField path="PrepareStmtTTL" type="time.Duration" default="1h">
+  Time-to-live for entries in the prepared statement LRU cache. Expired entries are evicted on the next access.
+</ParamField>
+
+## Querying
+
+<ParamField path="QueryFields" type="bool" default="false">
+  When `true`, `SELECT` statements explicitly list every column name from the model instead of using `SELECT *`. Useful when tables have columns that conflict with GORM's scanning logic.
+</ParamField>
+
+<ParamField path="CreateBatchSize" type="int" default="0">
+  Default batch size used by `Create` when `Config.CreateBatchSize > 0`. Individual calls to `CreateInBatches` can override this per-call.
+</ParamField>
+
+## Migrations
+
+<ParamField path="DisableAutomaticPing" type="bool" default="false">
+  When `true`, GORM does not call `Ping()` on the connection pool after `Open`. Useful when connecting to databases that do not support ping, or when you want to defer the first connection.
+</ParamField>
+
+<ParamField path="DisableForeignKeyConstraintWhenMigrating" type="bool" default="false">
+  When `true`, `AutoMigrate` and `Migrator` do not create foreign key constraints. The relationships are still inferred in Go but not enforced at the database level.
+</ParamField>
+
+<ParamField path="IgnoreRelationshipsWhenMigrating" type="bool" default="false">
+  When `true`, `AutoMigrate` ignores all relationships and does not create join tables or foreign key constraints.
+</ParamField>
+
+## Low-level / advanced
+
+<ParamField path="ClauseBuilders" type="map[string]clause.ClauseBuilder">
+  A map of custom clause builders keyed by clause name. Use this to override or extend how SQL clauses are rendered for a specific dialector.
+</ParamField>
+
+<ParamField path="ConnPool" type="ConnPool">
+  The underlying connection pool. Normally set by the dialector during `Initialize`. You can supply a custom pool (e.g., a `*sql.DB` you configure yourself) before calling `Open`.
+</ParamField>
+
+<ParamField path="Dialector" type="Dialector">
+  The database dialector embedded in `Config`. Set automatically by `Open` from the first argument.
+</ParamField>
+
+<ParamField path="Plugins" type="map[string]Plugin">
+  The registry of plugins registered via `db.Use(...)`. Keyed by plugin name.
+</ParamField>
